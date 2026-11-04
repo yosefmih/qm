@@ -44,14 +44,15 @@ export function requestHostname(req: IncomingMessage): string {
   return hostnameOf(req.headers.host ?? "");
 }
 
-export function forwardedHostname(req: IncomingMessage): string | undefined {
+export function forwardedHost(req: IncomingMessage): string | undefined {
   const raw = req.headers["x-forwarded-host"];
-  return typeof raw === "string" && raw.trim() ? hostnameOf(raw.split(",")[0]!) : undefined;
+  const first = typeof raw === "string" ? raw.split(",")[0]!.trim().toLowerCase() : "";
+  return first || undefined;
 }
 
 export function forwardedHostTenants(lookup: HostTenantLookup, req: IncomingMessage): HostTenantLookup {
-  const forwarded = forwardedHostname(req);
-  return (host) => lookup(forwarded ?? host);
+  const forwarded = forwardedHost(req);
+  return (host) => lookup(forwarded ? hostnameOf(forwarded) : host);
 }
 
 export async function inHostTenant(

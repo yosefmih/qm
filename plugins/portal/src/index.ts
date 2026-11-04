@@ -371,7 +371,13 @@ function sendHtml(res: ServerResponse, status: number, html: string, csp = PAGE_
   );
 }
 
-const sameOriginRequest = (req: IncomingMessage) => sameOriginFor(req, ORIGIN);
+const sameOriginRequest = (req: IncomingMessage) => sameOriginFor(req, requestOrigin(req));
+
+function requestOrigin(req: IncomingMessage): string {
+  const tenantHost = tenantHostOf(req);
+  if (!tenantHost || !ORIGIN) return ORIGIN;
+  return URL.parse(`${new URL(ORIGIN).protocol}//${tenantHost}`)?.origin ?? ORIGIN;
+}
 
 function wantsHtml(req: IncomingMessage): boolean {
   const accept = req.headers.accept;
@@ -977,9 +983,9 @@ const server = createServer((req, res) => {
         Math.round(performance.now() - startedAt),
       );
   });
-  const lookup = async (host: string): Promise<HostTenant> => {
-    const found = await hostTenants(host);
-    hostTenantOf.set(req, { ...found, host });
+  const lookup = async (hostname: string): Promise<HostTenant> => {
+    const found = await hostTenants(hostname);
+    hostTenantOf.set(req, { ...found, host: (req.headers.host ?? hostname).trim().toLowerCase() });
     return found;
   };
   let served: Promise<void>;

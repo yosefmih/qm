@@ -80,3 +80,13 @@ test("a public share reaches core under the tenant of the host it was requested 
   await hostRequest(`${base}/share/external/${SHARE}`, "b.example.test");
   assert.deepEqual(shareTenants, [A, B]);
 });
+
+test("a write from a tenant host's own origin passes the same-origin check, and another tenant's origin is refused", async () => {
+  const logout = (origin: string) =>
+    hostRequest(`${base}/auth/logout`, "a.example.test", {
+      method: "POST",
+      headers: { origin, "sec-fetch-site": origin === "http://a.example.test" ? "same-origin" : "cross-site" },
+    });
+  assert.notEqual((await logout("http://a.example.test")).status, 403);
+  assert.equal((await logout("http://b.example.test")).status, 403);
+});

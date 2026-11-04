@@ -10,7 +10,7 @@ import { verifyPassword } from "./password.ts";
 import { claimOnce, withinRateLimit, ClaimStoreUnavailableError, type ClaimStore } from "../../chassis/src/claims.ts";
 import { coreEmailAllowed } from "../../chassis/src/external-members.ts";
 import type { TenantSignIn, TenantSignInLookup } from "../../chassis/src/tenant-sign-in.ts";
-import { forwardedHostname } from "../../chassis/src/host-tenant.ts";
+import { forwardedHost } from "../../chassis/src/host-tenant.ts";
 import { boundTenant } from "../../chassis/src/tenant.ts";
 import { mintIdToken, pkceMatches, safeEqual, subjectFor, TokenSigner, type AuthRequest } from "./tokens.ts";
 import { ID_TOKEN_ALG, type SigningKey } from "./keys.ts";
@@ -145,7 +145,7 @@ export function createAuthHandler(deps: AuthDeps): AuthHandler {
   const built = new Map<string, AuthHandler>();
   return async (req, res) => {
     const signIn = await lookup();
-    const host = boundTenant() ? forwardedHostname(req) : undefined;
+    const host = boundTenant() ? forwardedHost(req) : undefined;
     const cfg = tenantAuthConfig(deps.cfg, signIn, host);
     if (cfg === deps.cfg) return base(req, res);
     const key = JSON.stringify([signIn, host]);
