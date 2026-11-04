@@ -116,6 +116,9 @@ public URL to core once, by hand, without a gap:
      --cluster <cluster> --services <core-ecs-service>
    ```
 
+   A blue/green roll of core can outlast the waiter's 10 minutes. If
+   `wait services-stable` exits 255 here or in step 6, run it again.
+
 5. Record the ARNs of portal's listener rule and both portal target groups with
    `terraform -chdir=infra state show`, then remove the retired services from
    Terraform state so the next apply leaves them running:
@@ -159,7 +162,11 @@ public URL to core once, by hand, without a gap:
    ```
 
 8. Confirm `terraform -chdir=infra plan` reports no changes, then run
-   `npm exec qm -- up --candidate candidate.json --yes` and
+   `npm exec qm -- up --candidate candidate.json --yes`. It rolls core once
+   more, because it rewrites the secret references in step 4's task
+   definition. `qm up` returns once only the new task serves, while the old
+   deployment keeps draining for several minutes. Wait until
+   `aws ecs describe-services` lists a single deployment for core, then run
    `npm exec qm -- check --live`. Deploy with `qm up` from then on.
 
 On a shared ALB, the company's target groups and listener rule live outside
