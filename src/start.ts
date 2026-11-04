@@ -53,7 +53,7 @@ export async function startQm(
   });
 
   await built.loadTenants();
-  await built.deploymentLayerReady;
+  await built.deploymentLayerReady();
   built.deploymentLayerRefresh.start();
   server.listen(config.port);
   await once(server, "listening");

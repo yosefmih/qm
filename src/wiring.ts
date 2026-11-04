@@ -115,7 +115,7 @@ import { installSeedSkills } from "./skills/seed.ts";
 import { createPostgresMapFactory, type DurableMap } from "./persistence/durable-map.ts";
 import type { PersistedUiState, UiStateStore } from "./surfaces/ui-state.ts";
 import { slackUserClientFactory } from "./loops/sources/slack.ts";
-import { configurePgCaTrust, configurePgPooling, migrateRegisteredPgSchemas } from "./persistence/pg-pool.ts";
+import { configurePgCaTrust, configurePgPooling } from "./persistence/pg-pool.ts";
 import { createPostgresLeaderLease, type LeaderLease } from "./persistence/leader-lease.ts";
 import { createPostgresAdvisoryLock, type AdvisoryLock } from "./persistence/advisory-lock.ts";
 import type {
@@ -471,7 +471,7 @@ export interface BuiltApp {
   deploymentLayer: DeploymentLayerRuntime;
   brokeredTools: readonly BrokeredLayerTool[];
   deploymentLayerStore: DeploymentLayerStore;
-  deploymentLayerReady: Promise<unknown>;
+  deploymentLayerReady: () => Promise<unknown>;
   deploymentLayerRefresh: Sweeper;
   loadTenants: () => Promise<void>;
   sessions: SessionStore;
@@ -714,13 +714,15 @@ export function buildApp(
         }
       : {}),
   });
-  const installTenant = Promise.resolve()
-    .then(() => migrateRegisteredPgSchemas(databaseUrl))
-    .then(() => ownerPgPool(pgArtifactMap.pool).q("SELECT qm_tenant_id()::text AS id"))
-    .then((rows) => String(rows[0]?.id));
+  let installTenantRow: Promise<string> | undefined;
+  const installTenant = () =>
+    (installTenantRow ??= ownerPgPool(pgArtifactMap.pool)
+      .q("SELECT qm_tenant_id()::text AS id")
+      .then((rows) => String(rows[0]?.id)));
   const hydrateDeploymentLayer = () =>
-    installTenant.then((tenant) => withTenant(tenant, () => deploymentLayerStore.hydrate()));
-  const deploymentLayerReady = hydrateDeploymentLayer();
+    installTenant().then((tenant) => withTenant(tenant, () => deploymentLayerStore.hydrate()));
+  let deploymentLayerHydrated: Promise<unknown> | undefined;
+  const deploymentLayerReady = () => (deploymentLayerHydrated ??= hydrateDeploymentLayer());
   const deploymentLayerRefresh = createUntrackedSweeper(
     () => withInstallTenant(() => deploymentLayerStore.hydrate()),
     30_000,
@@ -741,10 +743,12 @@ export function buildApp(
       });
     }
   };
-  let skillsReady = deploymentLayerReady.then(
-    () => undefined,
-    (e) => console.error("[seed] deployment layer not ready:", errMessage(e)),
-  );
+  let skillsReady: Promise<void> | undefined;
+  const currentSkillsReady = () =>
+    (skillsReady ??= deploymentLayerReady().then(
+      () => undefined,
+      (e) => console.error("[seed] deployment layer not ready:", errMessage(e)),
+    ));
   const budgetOpts = {
     ...(config.budgetUsdPerWindow !== undefined ? { limitUsd: config.budgetUsdPerWindow } : {}),
     ...(config.orgBudgetUsdPerWindow !== undefined ? { orgLimitUsd: config.orgBudgetUsdPerWindow } : {}),
@@ -2184,7 +2188,7 @@ export function buildApp(
     memoryStrategy,
     skills,
     skillBundles,
-    skillsReady: () => skillsReady,
+    skillsReady: currentSkillsReady,
     errors,
     signals: runSignals,
     turnStream,
@@ -3030,7 +3034,7 @@ export function buildApp(
     deploymentLayerReady,
     deploymentLayerRefresh,
     loadTenants: async () => {
-      const install = await installTenant;
+      const install = await installTenant();
       const rows = await ownerPgPool(pgArtifactMap.pool).q("SELECT id::text AS id FROM tenants ORDER BY id");
       const tenants = rows.map((row) => String(row.id));
       registerTenants(install, tenants.length === 1 ? tenants[0] : undefined);
@@ -3050,7 +3054,7 @@ export function buildApp(
       });
       if (config.seedSkills)
         skillsReady = Promise.all([
-          skillsReady,
+          currentSkillsReady(),
           withoutTenant(() => forEachTenant(pgArtifactMap.pool, installCatalogs)).catch((e) =>
             console.error("[seed] failed to install seed skills:", errMessage(e)),
           ),
