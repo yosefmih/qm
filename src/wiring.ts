@@ -115,7 +115,7 @@ import { installSeedSkills } from "./skills/seed.ts";
 import { createPostgresMapFactory, type DurableMap } from "./persistence/durable-map.ts";
 import type { PersistedUiState, UiStateStore } from "./surfaces/ui-state.ts";
 import { slackUserClientFactory } from "./loops/sources/slack.ts";
-import { configurePgCaTrust, configurePgPooling } from "./persistence/pg-pool.ts";
+import { configurePgCaTrust, configurePgPooling, migrateRegisteredPgSchemas } from "./persistence/pg-pool.ts";
 import { createPostgresLeaderLease, type LeaderLease } from "./persistence/leader-lease.ts";
 import { createPostgresAdvisoryLock, type AdvisoryLock } from "./persistence/advisory-lock.ts";
 import type {
@@ -714,8 +714,8 @@ export function buildApp(
         }
       : {}),
   });
-  const installTenant = pgArtifactMap.pool
-    .pool()
+  const installTenant = Promise.resolve()
+    .then(() => migrateRegisteredPgSchemas(databaseUrl))
     .then(() => ownerPgPool(pgArtifactMap.pool).q("SELECT qm_tenant_id()::text AS id"))
     .then((rows) => String(rows[0]?.id));
   const hydrateDeploymentLayer = () =>
