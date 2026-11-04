@@ -3011,49 +3011,6 @@ export function awsBackgroundWorkBootState(config: QmConfig): { enabled: boolean
   };
 }
 
-function stableWorkloadCapacity(
-  config: QmConfig,
-  workload: string,
-  state: EcsServiceState,
-  taskDefinition: string,
-  desiredCount: number | undefined,
-): void {
-  const primary = state.deployments?.filter((deployment) => deployment.status === "PRIMARY") ?? [];
-  const deployment = primary[0];
-  if (
-    typeof desiredCount !== "number" ||
-    !Number.isSafeInteger(desiredCount) ||
-    desiredCount < 0 ||
-    state.status !== "ACTIVE" ||
-    state.taskDefinition !== taskDefinition ||
-    state.desiredCount !== desiredCount ||
-    state.runningCount !== desiredCount ||
-    state.pendingCount !== 0 ||
-    primary.length !== 1 ||
-    !deployment?.id ||
-    deployment.taskDefinition !== taskDefinition ||
-    deployment.runningCount !== desiredCount ||
-    state.deployments?.some((item) => item.pendingCount !== 0 || (item !== deployment && item.runningCount !== 0)) ||
-    (state.deploymentConfiguration?.strategy === "BLUE_GREEN"
-      ? nativeBlueGreenStatus(config, workload, taskDefinition) !== "SUCCESSFUL"
-      : deployment.rolloutState !== "COMPLETED")
-  )
-    throw new CliError(`${workload} has not reached stable deployment capacity`);
-  const live: string[] = [];
-  for (const task of serviceTaskInventory(config, workload)) {
-    if (task.lastStatus === "STOPPED") continue;
-    if (
-      task.lastStatus !== "RUNNING" ||
-      task.desiredStatus !== "RUNNING" ||
-      task.taskDefinitionArn !== taskDefinition ||
-      !healthyTask(workload, task)
-    )
-      throw new CliError(`${workload} still has a pending, unhealthy, or retiring task`);
-    live.push(task.taskArn!);
-  }
-  if (live.length !== desiredCount) throw new CliError(`${workload} does not have its exact stable task cohort`);
-}
-
 export async function awsSetBackgroundWork(
   config: QmConfig,
   configDir: string,
