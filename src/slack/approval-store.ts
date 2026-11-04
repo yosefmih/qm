@@ -3,6 +3,7 @@ import type { PendingApprovalRecord } from "../types.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import { principalDestination } from "../reach/reach.ts";
+import { withTenant } from "../tenants/context.ts";
 
 export function approvalDeliveryKey(id: string, record: Pick<PendingApprovalRecord, "createdAt">): string {
   return `command-approval:${id}:${record.createdAt ?? 0}`;
@@ -21,15 +22,14 @@ export function createApprovalStore(
     if (record.request?.surface !== "slack") return;
     const actorId = approvalDeliveryRecipient(record.request.actor);
     if (!actorId) return;
-    const threadTs = record.request.conversation?.kind === "dm" ? record.request.slackSource?.replyThreadTs : undefined;
+    const origin = record.request.surfaceOrigin;
+    const threadTs = record.request.conversation?.kind === "dm" ? origin?.replyThread : undefined;
     await deliveries.enqueue({
       destination: {
         ...principalDestination(actorId, actorId),
         commandApprovalId: id,
         ...(threadTs ? { threadTs } : {}),
-        ...(record.request.slackSource
-          ? { slackAccountId: record.request.slackSource.accountId, slackTeamId: record.request.slackSource.teamId }
-          : {}),
+        ...(origin ? { account: { id: origin.author.account, workspace: origin.workspace } } : {}),
       },
       text: `Approval needed: ${record.summary ?? record.command}`,
       idempotencyKey: approvalDeliveryKey(id, record),
@@ -42,7 +42,8 @@ export function createApprovalStore(
       await deliver(id, record).catch(swallowAs("approvals: enqueue delivery", undefined));
     },
     async deliverPending(): Promise<void> {
-      for (const [id, record] of await backing.entries()) await deliver(id, record);
+      for (const { tenantId, id, value } of await backing.acrossTenants())
+        await withTenant(tenantId, () => deliver(id, value));
     },
   };
 }

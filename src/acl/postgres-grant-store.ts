@@ -1,8 +1,11 @@
 import { createPgPool, withPgTransaction } from "../persistence/pg-pool.ts";
 import type { Grant, Permission, ScopeId } from "../types.ts";
 import { sameGrantSet, type GrantPersistence } from "./acl-store.ts";
+import { refPrefix } from "./resource-ref.ts";
+import { likeEscape } from "../persistence/like.ts";
+import { TENANCY, tenantTables } from "../tenants/migrations.ts";
 
-function rowToGrant(r: Record<string, unknown>): Grant {
+export function rowToGrant(r: Record<string, unknown>): Grant {
   return {
     ownerScopeId: r.owner_scope_id as ScopeId,
     ref: r.path as string,
@@ -14,6 +17,7 @@ function rowToGrant(r: Record<string, unknown>): Grant {
 
 export function createPostgresGrantStore(connectionString: string): GrantPersistence {
   const db = createPgPool(connectionString, [
+    ...TENANCY,
     {
       id: "acl/grants/0001",
       statements: [
@@ -80,21 +84,65 @@ export function createPostgresGrantStore(connectionString: string): GrantPersist
       $migrate$`,
       ],
     },
+    {
+      id: "acl/grants/0004-grantee-index",
+      statements: [
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS acl_grants_by_grantee ON acl_grants(grantee_scope_id, path text_pattern_ops)`,
+      ],
+    },
+    ...tenantTables(
+      "acl/grants/0005-tenants",
+      [
+        { table: "acl_grants", primaryKey: "owner_scope_id, path, grantee_scope_id, permission" },
+        { table: "acl_grants_version", primaryKey: "only_row" },
+      ],
+      {
+        before: [`DELETE FROM acl_grants_version`],
+        after: [
+          `CREATE OR REPLACE FUNCTION acl_grants_bump_version() RETURNS trigger LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF TG_LEVEL = 'STATEMENT' THEN
+          UPDATE acl_grants_version SET v = v + 1;
+        ELSE
+          INSERT INTO acl_grants_version(tenant_id, only_row, v)
+          SELECT DISTINCT tenant, TRUE, 1
+            FROM (VALUES (CASE WHEN TG_OP <> 'INSERT' THEN OLD.tenant_id END),
+                         (CASE WHEN TG_OP <> 'DELETE' THEN NEW.tenant_id END)) changed(tenant)
+           WHERE tenant IS NOT NULL
+          ON CONFLICT (tenant_id, only_row) DO UPDATE SET v = acl_grants_version.v + 1;
+        END IF;
+        RETURN NULL;
+      END
+      $fn$`,
+          `DROP TRIGGER IF EXISTS acl_grants_bump ON acl_grants`,
+          `CREATE TRIGGER acl_grants_bump AFTER INSERT OR UPDATE OR DELETE ON acl_grants
+      FOR EACH ROW EXECUTE FUNCTION acl_grants_bump_version()`,
+          `DROP TRIGGER IF EXISTS acl_grants_truncate ON acl_grants`,
+          `CREATE TRIGGER acl_grants_truncate AFTER TRUNCATE ON acl_grants
+      FOR EACH STATEMENT EXECUTE FUNCTION acl_grants_bump_version()`,
+        ],
+      },
+    ),
   ]);
   const { q } = db;
-  let cache: { v: string; grants: readonly Grant[] } | null = null;
 
   return {
-    async all() {
-      const versionRows = await q("SELECT v FROM acl_grants_version");
-      const version = versionRows.length ? String(versionRows[0]!.v) : null;
-      if (cache && version !== null && cache.v === version) return [...cache.grants];
+    async find(query) {
+      const where: string[] = [];
+      const params: unknown[] = [];
+      const match = (condition: (param: string) => string, value: unknown) => {
+        params.push(value);
+        where.push(condition(`$${params.length}`));
+      };
+      if (query.ownerScopeId !== undefined) match((p) => `owner_scope_id = ${p}`, query.ownerScopeId);
+      if (query.ref !== undefined) match((p) => `path = ${p}`, query.ref);
+      if (query.kind !== undefined) match((p) => `path LIKE ${p}`, `${likeEscape(refPrefix(query.kind))}%`);
+      if (query.granteeScopeIds !== undefined) match((p) => `grantee_scope_id = ANY(${p})`, [...query.granteeScopeIds]);
       const rows = await q(
-        "SELECT owner_scope_id, path, grantee_scope_id, permission, granted_by FROM acl_grants ORDER BY owner_scope_id, path, grantee_scope_id, permission",
+        `SELECT owner_scope_id, path, grantee_scope_id, permission, granted_by FROM acl_grants WHERE ${where.join(" AND ")} ORDER BY owner_scope_id, path, grantee_scope_id, permission`,
+        params,
       );
-      const grants = rows.map(rowToGrant);
-      cache = version === null ? null : { v: version, grants };
-      return [...grants];
+      return rows.map(rowToGrant);
     },
     async put(g) {
       await withPgTransaction(await db.pool(), async (client) => {
@@ -102,7 +150,7 @@ export function createPostgresGrantStore(connectionString: string): GrantPersist
         await client.query(
           `INSERT INTO acl_grants (owner_scope_id, path, grantee_scope_id, permission, granted_by)
            VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (owner_scope_id, path, grantee_scope_id, permission)
+           ON CONFLICT (tenant_id, owner_scope_id, path, grantee_scope_id, permission)
            DO UPDATE SET granted_by = EXCLUDED.granted_by`,
           [g.ownerScopeId, g.ref, g.granteeScopeId, g.permission, g.grantedBy],
         );

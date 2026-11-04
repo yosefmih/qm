@@ -62,7 +62,7 @@ test("the front door refuses to boot in production without the sign-in secrets t
   }
 });
 
-test("background ownership requires strong control credentials only for configured deployments", () => {
+test("a deployment id requires strong control credentials only for configured deployments", () => {
   assert.deepEqual(validateCoreSecretEnv({}), []);
   for (const secret of [undefined, "", " ".repeat(32), "short", "separate-control-secret-value-0000000000\n"]) {
     assert.deepEqual(

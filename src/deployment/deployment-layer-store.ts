@@ -3,13 +3,14 @@ import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import type { ScopeId } from "../types.ts";
 import {
+  foreignSkillCollision,
   safeSkillFilePath,
   type Skill,
   type SkillFile,
   type SkillManifest,
   type SkillStore,
 } from "../skills/skill-store.ts";
-import { foreignSkillCollision, parseSeedSkill, sameManifest, upsertSeedSkill } from "../skills/seed.ts";
+import { parseSeedSkill, sameManifest, upsertSeedSkill } from "../skills/seed.ts";
 import {
   bundleFilePaths,
   detectPathCollisions,
@@ -20,6 +21,7 @@ import {
 import type { SkillBundleStore } from "../skills/skill-bundle-store.ts";
 import { createKeyedQueue, sleep } from "../util/async.ts";
 import { errMessage } from "../util/errors.ts";
+import { isInstallTenant } from "../tenants/context.ts";
 import { parseToolDescriptor, type ToolDescriptor } from "./deployment-layer.ts";
 import {
   declaredInstallFiles,
@@ -252,7 +254,7 @@ export function createDeploymentLayerStore(opts: {
   skills: SkillStore;
   skillBundles?: SkillBundleStore;
   scopeId: ScopeId;
-  seedFallback?: () => Promise<unknown>;
+  seedFallback?: () => Promise<boolean>;
   now?: () => number;
   retryDelaysMs?: readonly number[];
   advisoryLock: AdvisoryLock;
@@ -443,14 +445,13 @@ export function createDeploymentLayerStore(opts: {
     } catch (error) {
       reportApplyFailure(record, error);
       if (!(error instanceof DeploymentLayerMutationError) && opts.seedFallback && !seeded) {
-        await opts.seedFallback();
-        seeded = true;
+        seeded = await opts.seedFallback();
       }
     }
     return record;
   };
 
-  return {
+  const store: DeploymentLayerStore = {
     isApplied: async (hash) => {
       if (appliedHash !== hash) return false;
       try {
@@ -478,8 +479,8 @@ export function createDeploymentLayerStore(opts: {
             return applyForHydrate(record);
           }
           if (opts.seedFallback && !seeded) {
-            await opts.seedFallback();
-            seeded = true;
+            seeded = await opts.seedFallback();
+            if (!seeded) return null;
             let appeared: StoredDeploymentLayer | null = null;
             try {
               appeared = await retrying(() => opts.backing.get(CURRENT));
@@ -601,5 +602,17 @@ export function createDeploymentLayerStore(opts: {
           return record;
         });
       }),
+  };
+  return {
+    isApplied: (hash) => (isInstallTenant() ? store.isApplied(hash) : Promise.resolve(false)),
+    live: () => (isInstallTenant() ? store.live() : { source: "none", contentHash: null, resolved: null }),
+    hydrate: () => (isInstallTenant() ? store.hydrate() : Promise.resolve(null)),
+    get: () => (isInstallTenant() ? store.get() : Promise.resolve(null)),
+    put: (bundle, updatedBy) =>
+      isInstallTenant()
+        ? store.put(bundle, updatedBy)
+        : Promise.reject(
+            new DeploymentLayerValidationError("Only the deployment's own tenant can store a deployment layer"),
+          ),
   };
 }

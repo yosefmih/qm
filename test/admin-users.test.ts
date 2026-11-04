@@ -7,16 +7,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { createInsecureTestServer } from "../src/api/server.ts";
+import type { ServerDeps } from "../src/api/deps.ts";
+import { gatewayActorId } from "../src/model/provider-endpoints.ts";
 import { buildApp } from "./support/build-app.ts";
 import { computeUsers } from "../src/admin/users.ts";
 import type { TurnRequest } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
 
-test("computeUsers dedupes participants, credits in-window turns, and joins admin status", () => {
+test("computeUsers dedupes participants, credits their turns, and joins admin status", () => {
   const participants = [
-    { sessionId: "s1", principalId: "U1", validFrom: 100, validTo: null, validFromSeq: null, validToSeq: null },
-    { sessionId: "s2", principalId: "U1", validFrom: 200, validTo: null, validFromSeq: null, validToSeq: null },
-    { sessionId: "s1", principalId: "U2", validFrom: 100, validTo: null, validFromSeq: null, validToSeq: null },
+    { sessionId: "s1", principalId: "U1" },
+    { sessionId: "s2", principalId: "U1" },
+    { sessionId: "s1", principalId: "U2" },
   ];
   const turns = [
     { principalId: "U1", sessionId: "s1", day: 0, turns: 2, firstAt: 150, lastAt: 160 },
@@ -35,16 +37,14 @@ test("computeUsers dedupes participants, credits in-window turns, and joins admi
   assert.equal(rows[0]!.principalId, "U2");
 });
 
-test("computeUsers sums a window's turn rollup and takes its latest timestamp", () => {
+test("computeUsers sums a participant's turn rollup and takes its latest timestamp", () => {
   const rows = computeUsers({
-    participants: [
-      { sessionId: "s1", principalId: "U1", validFrom: 100, validTo: 200, validFromSeq: null, validToSeq: null },
-    ],
+    participants: [{ sessionId: "s1", principalId: "U1" }],
     turns: [{ principalId: "U1", sessionId: "s1", day: 0, turns: 2, firstAt: 100, lastAt: 199 }],
     grants: [],
   });
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.turnCount, 2, "the window's two in-window turns");
+  assert.equal(rows[0]!.turnCount, 2, "the participant's two turns");
   assert.equal(rows[0]!.lastSeenAt, 199);
 });
 
@@ -61,9 +61,10 @@ test("computeUsers includes a grant-holder who has never participated", () => {
   assert.equal(rows[0]!.admin.isAdmin, true);
 });
 
-function start() {
+function start(extra: Partial<ServerDeps> = {}) {
   const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "admin-users-")) }));
   const server = createInsecureTestServer(built.app, {
+    ...extra,
     admin: built.admin,
     sessions: built.sessions,
     files: built.files,
@@ -105,6 +106,35 @@ test("/v1/admin/users: org_admin sees the roster + grants; a non-admin is denied
     assert.ok((await s.built.auditLog.events()).some((e) => e.action === "users.read"));
   } finally {
     await s.close();
+  }
+});
+
+test("/v1/admin/users: each person carries the pseudonym the model gateway receives for them", async () => {
+  const gateway = { url: "https://gateway.test", apiKey: "k", apiKeyHeader: "api-key", models: {} };
+  const s = start({ modelGatewayTransport: { ...gateway, actorKey: "gateway-actor-key" } });
+  const unkeyed = start({ modelGatewayTransport: gateway });
+  try {
+    const dm: TurnRequest = {
+      surface: "test",
+      actor: { externalId: "U1" },
+      conversation: { kind: "dm", threadRef: "dm:U1:pseudonym" },
+      text: "hello",
+    };
+    assert.equal((await s.built.app.turn(dm)).status, "ok");
+    const roster = async (base: string) =>
+      (
+        (await (
+          await fetch(`${base}/v1/admin/users`, { headers: { "x-admin-actor": "admin-alice@default-org" } })
+        ).json()) as {
+          users: Array<{ principalId: string; gatewayActor?: string }>;
+        }
+      ).users.find((u) => u.principalId === "U1");
+    assert.equal((await roster(s.base))?.gatewayActor, gatewayActorId("U1", "gateway-actor-key"));
+    assert.equal((await unkeyed.built.app.turn(dm)).status, "ok");
+    assert.equal((await roster(unkeyed.base))?.gatewayActor, undefined);
+  } finally {
+    await s.close();
+    await unkeyed.close();
   }
 });
 

@@ -1,16 +1,14 @@
 import { cleanupFailedProvision } from "./sandbox.ts";
 import { randomUUID } from "node:crypto";
-import type { WorkspaceLayer } from "../types.ts";
-import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
+import { inTenantOf } from "../tenants/claim.ts";
 import { orgId as configOrgId } from "../config.ts";
 import { createKeyedQueue } from "../util/async.ts";
 import { swallowAs, errMessage } from "../util/errors.ts";
 import { shq } from "../util/shell.ts";
 import { nonInteractiveShellPrefix, DROPPED_PROXY_ENV, forceThroughProxyEnv } from "./sandbox-env.ts";
 import { createExecProcessSessions, type ExecProcessIo } from "./exec-process-session.ts";
-import { materializeRoLayers } from "./ro-layers.ts";
 import { withConnectorSdk, type ConnectorSdkBundle } from "./connector-sdk.ts";
 import { createLayerToolInstaller } from "./layer-tool-install.ts";
 import type { LayerInstallFile } from "../deployment/load-layer.ts";
@@ -50,8 +48,6 @@ import type {
 
 const HOME_DIR = "/root";
 const WORKSPACE_BASENAME = "workspace";
-const RO_LAYERS_TAR = ".ro-layers.tar";
-const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const HOME_TAR = `${HOME_DIR}/.qm-home.tar`;
 const HYDRATED_MARKER = `${HOME_DIR}/.qm-hydrated`;
 const ACTIVITY_TOUCH_INTERVAL_MS = 10 * 60_000;
@@ -99,7 +95,7 @@ export interface ModalSandboxOptions extends BlobStagingOptions {
   onError?: (e: { category: string; code: string; message: string; scopeLabel?: string }) => void;
 }
 
-export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandboxOptions): Sandbox {
+export function createModalSandbox(opts: ModalSandboxOptions): Sandbox {
   const client = opts.client;
   const prefix = opts.namePrefix ?? "qm";
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
@@ -620,11 +616,59 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
     );
   }
 
+  async function reapIdleScope(scope: string, rec: StoredModalSandbox, now: number, cutoff: number): Promise<number> {
+    if (rec.orgId && rec.orgId !== configOrgId()) return 0;
+    if (rec.hydrationPending) return 0;
+    const name = sandboxScopeName(prefix, scope);
+    scopeByName.set(name, scope);
+    let session: ModalSession | undefined;
+    try {
+      session = sessionByName.get(name) ?? (await client.fromId(rec.sandboxId));
+    } catch (e) {
+      if (!(e instanceof ModalSandboxGoneError)) {
+        reportError("sandbox_reap", "deep_idle_probe_failed", errMessage(e), scope);
+        return 0;
+      }
+    }
+    if (!session) {
+      sessionByName.delete(name);
+      if (!rec.nativeSnapshotId)
+        await store.delete(scope).catch(swallowAs("modal-sandbox: forget retired sandbox", undefined));
+      else if (checkpointRenewalDue(rec, now)) await renewCheckpoint(scope, name, rec);
+      return 0;
+    }
+    if (rec.expiresAtMs && rec.expiresAtMs - now <= lifetimeMarginMs) {
+      return retire(scope, name, rec, session);
+    }
+    if (rec.lastActivityMs && rec.lastActivityMs <= cutoff) {
+      let busy: boolean;
+      try {
+        const handle: SandboxHandle = { id: name, rootDir: workspaceDir, homeDir: HOME_DIR, coldStart: false };
+        const live = await createExecProcessSessions(directProcIo(session)).listProcesses(handle);
+        busy = live.some((p) => p.status.state === "running");
+      } catch (e) {
+        if (e instanceof ModalSandboxGoneError) {
+          sessionByName.delete(name);
+          if (!rec.nativeSnapshotId)
+            await store.delete(scope).catch(swallowAs("modal-sandbox: forget retired sandbox", undefined));
+        } else {
+          reportError("sandbox_reap", "deep_idle_probe_failed", errMessage(e), scope);
+        }
+        return 0;
+      }
+      if (!busy) {
+        return retire(scope, name, rec, session, cutoff);
+      }
+    }
+    if (now - lastSnapshotAttemptMs(rec) > snapshotIntervalMs) await refreshCheckpoint(scope, rec, session);
+    return 0;
+  }
+
   async function sweepOrphans(now: number): Promise<number> {
     if (!client.listRunning) return 0;
     const tracked = async (): Promise<Set<string>> => {
       const ids = new Set<string>();
-      for (const [, rec] of await store.entries()) ids.add(rec.sandboxId);
+      for (const { value } of await store.acrossTenants()) ids.add(value.sandboxId);
       for (const session of sessionByName.values()) ids.add(session.sandboxId);
       return ids;
     };
@@ -675,10 +719,8 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
     ...execFileOps,
     ...blobStaging,
 
-    async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
+    async provision(scope: string, provOpts?: ProvisionOptions): Promise<SandboxHandle> {
       const scratch = provOpts?.scratch;
-      const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
-      const scope = writable?.scopeId ?? "default";
       let name: string;
       let coldStart: boolean;
       if (scratch) {
@@ -711,18 +753,6 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
             writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
           },
           `mkdir -p ${shq(workspaceDir)}${credLinks}`,
-        );
-
-        await materializeRoLayers(
-          workspace,
-          layers,
-          handle,
-          {
-            readFile: (h, rel) => sandbox.readFile(h, rel),
-            writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
-            exec: (script, t) => execRaw(name, script, t),
-          },
-          { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "modal" },
         );
 
         return handle;
@@ -901,54 +931,8 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
       const now = Date.now();
       const cutoff = now - Math.min(idleMs, reapIdleMs);
       let reaped = 0;
-      for (const [scope, rec] of await store.entries()) {
-        if (rec.orgId && rec.orgId !== configOrgId()) continue;
-        if (rec.hydrationPending) continue;
-        const name = sandboxScopeName(prefix, scope);
-        scopeByName.set(name, scope);
-        let session: ModalSession | undefined;
-        try {
-          session = sessionByName.get(name) ?? (await client.fromId(rec.sandboxId));
-        } catch (e) {
-          if (!(e instanceof ModalSandboxGoneError)) {
-            reportError("sandbox_reap", "deep_idle_probe_failed", errMessage(e), scope);
-            continue;
-          }
-        }
-        if (!session) {
-          sessionByName.delete(name);
-          if (!rec.nativeSnapshotId)
-            await store.delete(scope).catch(swallowAs("modal-sandbox: forget retired sandbox", undefined));
-          else if (checkpointRenewalDue(rec, now)) await renewCheckpoint(scope, name, rec);
-          continue;
-        }
-        if (rec.expiresAtMs && rec.expiresAtMs - now <= lifetimeMarginMs) {
-          reaped += await retire(scope, name, rec, session);
-          continue;
-        }
-        if (rec.lastActivityMs && rec.lastActivityMs <= cutoff) {
-          let busy: boolean;
-          try {
-            const handle: SandboxHandle = { id: name, rootDir: workspaceDir, homeDir: HOME_DIR, coldStart: false };
-            const live = await createExecProcessSessions(directProcIo(session)).listProcesses(handle);
-            busy = live.some((p) => p.status.state === "running");
-          } catch (e) {
-            if (e instanceof ModalSandboxGoneError) {
-              sessionByName.delete(name);
-              if (!rec.nativeSnapshotId)
-                await store.delete(scope).catch(swallowAs("modal-sandbox: forget retired sandbox", undefined));
-            } else {
-              reportError("sandbox_reap", "deep_idle_probe_failed", errMessage(e), scope);
-            }
-            continue;
-          }
-          if (!busy) {
-            reaped += await retire(scope, name, rec, session, cutoff);
-            continue;
-          }
-        }
-        if (now - lastSnapshotAttemptMs(rec) > snapshotIntervalMs) await refreshCheckpoint(scope, rec, session);
-      }
+      for (const { tenantId, id: scope, value: rec } of await store.acrossTenants())
+        reaped += await inTenantOf(tenantId, () => reapIdleScope(scope, rec, now, cutoff));
       reaped += await sweepOrphans(now);
       return { reaped };
     },

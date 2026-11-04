@@ -122,6 +122,7 @@ export function adminRoutes(d: AdminRouteDeps) {
     if (method === "GET" && rest === "spend" && c.url.searchParams.get("format") === "csv")
       return download(c, corePath);
     if (method === "POST" && rest === "files/upload") return upload(c);
+    if (method === "POST" && rest === "spend/export-token") return relay(c, "POST", corePath, await d.readBody(c.req));
     if (first === "scopes" && rest.length > "scopes/".length) {
       if (method === "GET") return relay(c, "GET", corePath);
       if (method === "PUT" && rest.lastIndexOf("/") > "scopes/".length) {
@@ -141,7 +142,7 @@ export function adminRoutes(d: AdminRouteDeps) {
       }
     }
     if (Object.hasOwn(ALLOWED, first) && ALLOWED[first]!.split(" ").includes(method)) {
-      const body = method === "GET" || method === "DELETE" ? "" : await d.readBody(c.req);
+      const body = method === "GET" ? "" : await d.readBody(c.req);
       return relay(c, method as HttpMethod, corePath, body);
     }
     c.req.resume();

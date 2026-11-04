@@ -7,9 +7,8 @@ import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { createLocalWebReleaseStore, createWebReleaseReader } from "../src/web/releases.ts";
-import { buildApp } from "../src/wiring.ts";
+import { startQm } from "../src/start.ts";
 import { loadConfig } from "../src/config.ts";
-import { createServer } from "../src/api/server.ts";
 import { PROVIDERS } from "../src/connectors/oauth.ts";
 import { scopeId } from "../src/types.ts";
 import { buildGoogleWorkspaceReadSmokeCommand } from "./google-workspace-read-smoke-command.ts";
@@ -91,7 +90,7 @@ function providerStatus(body: Json): { connected: boolean } {
 }
 
 async function runWorkspaceReadSmoke(input: {
-  built: ReturnType<typeof buildApp>;
+  built: Awaited<ReturnType<typeof startQm>>["built"];
   actor: string;
   orgId: string;
   hosts: string[];
@@ -134,10 +133,6 @@ async function probeGoogleTokenEndpoint(redirectUri: string): Promise<string> {
   return error || `http_${res.status}`;
 }
 
-async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
-  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-}
-
 const loadedEnv = loadEnvFallbacks();
 const missing = ["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"].filter((name) => !process.env[name]);
 if (missing.length > 0) {
@@ -170,24 +165,17 @@ if (expectedRedirect && expectedRedirect !== redirectUri) {
   process.exit(2);
 }
 
-const built = buildApp({
+const { built, stop } = await startQm({
   ...loadConfig({}),
   databaseUrl: process.env.DATABASE_URL,
   port: corePort,
   dataDir: process.env.DATA_DIR ?? mkdtempSync(join(tmpdir(), "qm-google-oauth-smoke-")),
   orgId,
-});
-const core = createServer(built.app, {
   signingSecret: secret,
-  connectorTokens: built.connectorTokens,
-  auditLog: built.auditLog,
-  replayDedupe: built.replayDedupe,
-  oauthEnv: process.env,
 });
 
 let web: Server | null = null;
 try {
-  await new Promise<void>((resolveListen) => core.listen(corePort, "127.0.0.1", () => resolveListen()));
   Object.assign(process.env, {
     CORE_API_URL: coreBase,
     CORE_ORG_ID: orgId,
@@ -272,6 +260,5 @@ try {
   }
 } finally {
   web?.close();
-  await closeServer(core);
-  await built.runtime.stop();
+  await stop();
 }

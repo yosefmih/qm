@@ -1,17 +1,16 @@
 import { cleanupFailedProvision } from "./sandbox.ts";
 import { DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { orgId as configOrgId } from "../config.ts";
-import type { WorkspaceLayer } from "../types.ts";
-import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
+import { inTenantOf } from "../tenants/claim.ts";
+import { tenantScopedId } from "../tenants/context.ts";
 import { createKeyedQueue } from "../util/async.ts";
 import { scopeStorageKey } from "../../cli/src/scope-storage-key.ts";
 import { swallowAs, errMessage } from "../util/errors.ts";
 import { shq } from "../util/shell.ts";
 import { nonInteractiveShellPrefix } from "./sandbox-env.ts";
 import { createExecProcessSessions, type ExecProcessIo } from "./exec-process-session.ts";
-import { materializeRoLayers } from "./ro-layers.ts";
 import {
   createBackendBlobStaging,
   createExecExport,
@@ -42,8 +41,6 @@ const WORKSPACE_BASENAME = "workspace";
 const WORKSPACE_DIR = `${HOME_DIR}/${WORKSPACE_BASENAME}`;
 const PREP_TIMEOUT_SEC = 30;
 const HOME_TAR = "/tmp/agent-home.tar";
-const RO_LAYERS_TAR = ".ro-layers.tar";
-const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const SNAPSHOT_PRUNE = [...HOME_SNAPSHOT_PRUNE, "./.npm", "./.aws"];
 
 const DEFAULT_INGRESS = (region: string) =>
@@ -98,7 +95,7 @@ interface BodyRef {
   endpoint: string;
 }
 
-export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOptions): Sandbox {
+export function createAwsSandbox(opts: AwsSandboxOptions): Sandbox {
   const region = opts.region;
   const api =
     opts.api ??
@@ -138,7 +135,7 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
     onError?.({ category, code, message, ...(scopeLabel ? { scopeLabel } : {}) });
   }
 
-  const s3KeyFor = (scope: string): string => `${s3Prefix}/${scopeStorageKey(scope)}.tar`;
+  const s3KeyFor = (scope: string): string => `${s3Prefix}/${scopeStorageKey(tenantScopedId(scope))}.tar`;
 
   const client = createMicrovmClient(api, {
     agentPort,
@@ -416,10 +413,8 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
     ...execFileOps,
     ...blobStaging,
 
-    async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
+    async provision(scope: string, provOpts?: ProvisionOptions): Promise<SandboxHandle> {
       const scratch = provOpts?.scratch;
-      const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
-      const scope = writable?.scopeId ?? "default";
       const body = scratch ? await ensureScratch(scratch.key) : await ensureBody(scope);
       const id = body.id;
       endpointById.set(id, body.endpoint);
@@ -446,18 +441,6 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
           throw new Error(
             `AWS sandbox credential setup failed: ${execFailureDetail(prepared, PREP_TIMEOUT_SEC).slice(0, 200)}`,
           );
-
-        await materializeRoLayers(
-          workspace,
-          layers,
-          handle,
-          {
-            readFile: (h, rel) => sandbox.readFile(h, rel),
-            writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
-            exec: (script, t) => execRaw(id, script, t),
-          },
-          { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "aws" },
-        );
 
         return handle;
       } catch (error) {
@@ -548,32 +531,34 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
       if (!(idleMs > 0)) return { reaped: 0 };
       const cutoff = Date.now() - idleMs;
       let reaped = 0;
-      for (const [scope, candidate] of await store.entries()) {
-        await withScopeLock(scope, async () => {
-          const rec = await store.get(scope);
-          if (!rec || rec.microvmId !== candidate.microvmId) return;
-          if (rec.orgId && rec.orgId !== configOrgId()) return;
-          if (!rec.lastActivityMs || rec.lastActivityMs > cutoff) return;
-          if (activeByMicrovm.has(rec.microvmId)) return;
-          const desc = await api.tryGetMicrovm(rec.microvmId);
-          if (!desc || desc.state === "TERMINATED" || desc.state === "TERMINATING") {
-            await store.delete(scope).catch(() => {});
-            return;
-          }
-          try {
-            endpointById.set(rec.microvmId, rec.endpoint);
-            const due = !rec.lastSnapshotMs || (rec.lastActivityMs ?? 0) > rec.lastSnapshotMs;
-            if (due) {
-              await ensureRunning(rec.microvmId);
-              await snapshotHome(scope, rec.microvmId);
+      for (const { tenantId, id: scope, value: candidate } of await store.acrossTenants()) {
+        await inTenantOf(tenantId, () =>
+          withScopeLock(scope, async () => {
+            const rec = await store.get(scope);
+            if (!rec || rec.microvmId !== candidate.microvmId) return;
+            if (rec.orgId && rec.orgId !== configOrgId()) return;
+            if (!rec.lastActivityMs || rec.lastActivityMs > cutoff) return;
+            if (activeByMicrovm.has(rec.microvmId)) return;
+            const desc = await api.tryGetMicrovm(rec.microvmId);
+            if (!desc || desc.state === "TERMINATED" || desc.state === "TERMINATING") {
+              await store.delete(scope).catch(() => {});
+              return;
             }
-            await api.terminate(rec.microvmId);
-            await store.delete(scope);
-            reaped++;
-          } catch (e) {
-            reportError("sandbox_reap", "deep_idle_reap_failed", errMessage(e), scope);
-          }
-        });
+            try {
+              endpointById.set(rec.microvmId, rec.endpoint);
+              const due = !rec.lastSnapshotMs || (rec.lastActivityMs ?? 0) > rec.lastSnapshotMs;
+              if (due) {
+                await ensureRunning(rec.microvmId);
+                await snapshotHome(scope, rec.microvmId);
+              }
+              await api.terminate(rec.microvmId);
+              await store.delete(scope);
+              reaped++;
+            } catch (e) {
+              reportError("sandbox_reap", "deep_idle_reap_failed", errMessage(e), scope);
+            }
+          }),
+        );
       }
       return { reaped };
     },

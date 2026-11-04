@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -9,6 +9,7 @@ let lastWhoamiSigned = false;
 let lastConsentClicker: string | null = null;
 let lastImpersonateIdentity: string | null = null;
 let agentApiRequests = 0;
+let flakyLookups = 0;
 const VALID_AGENT_CAPABILITY = "valid.agent.capability";
 let deploymentLayerRequests = 0;
 const VALID_SOURCE_SIGNATURE = "v0=valid-source-signature";
@@ -30,11 +31,7 @@ const upstream = createServer((req: IncomingMessage, res) => {
       res.end(JSON.stringify({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString("utf8") }));
     });
   }
-  if (
-    req.url?.startsWith("/v1/deployment-layer") ||
-    req.url?.startsWith("/v1/background-work") ||
-    req.url?.startsWith("/v1/deployment/live-session")
-  ) {
+  if (req.url?.startsWith("/v1/deployment-layer") || req.url?.startsWith("/v1/deployment/live-session")) {
     deploymentLayerRequests++;
     if (req.headers["x-timestamp"] !== "123" || req.headers["x-signature"] !== VALID_SOURCE_SIGNATURE) {
       res.writeHead(401, { "content-type": "application/json" });
@@ -74,6 +71,11 @@ const upstream = createServer((req: IncomingMessage, res) => {
   if (req.url?.startsWith("/v1/principals/U-alias/canonical")) {
     res.writeHead(200, { "content-type": "application/json" });
     return void res.end(JSON.stringify({ principalId: "U-alias", canonicalId: "U1" }));
+  }
+  if (req.url?.startsWith("/v1/principals/U-flaky/canonical")) {
+    flakyLookups++;
+    res.writeHead(flakyLookups === 1 ? 200 : 500, { "content-type": "application/json" });
+    return void res.end(JSON.stringify(flakyLookups === 1 ? { canonicalId: "U1" } : { error: "timeout" }));
   }
   if (req.url?.startsWith("/v1/principals/U-unresolved/canonical")) {
     res.writeHead(500, { "content-type": "application/json" });
@@ -236,6 +238,31 @@ test("when core cannot resolve the session subject the portal refuses to proxy i
   assert.notEqual(logout.status, 503, "auth routes still work without core");
 });
 
+test("a signed-in user keeps their last known identity while core cannot answer the lookup", async () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    const first = await fetch(`${base}/api/x`, { headers: { cookie: sessionCookie("U-flaky") } });
+    assert.equal(((await first.json()) as { cookie: string }).cookie, "webuiuser=U1");
+    mock.timers.tick(61_000);
+    for (let i = 0; i < 2; i++) {
+      const r = await fetch(`${base}/api/x`, { headers: { cookie: sessionCookie("U-flaky") } });
+      assert.equal(r.status, 200);
+      assert.equal(((await r.json()) as { cookie: string }).cookie, "webuiuser=U1");
+    }
+    const drop = await fetch(`${base}/drop/abc/form`, { headers: { cookie: sessionCookie("U-flaky") } });
+    assert.equal(drop.status, 503, "routes core does not re-verify never act on a stale identity");
+    const app = await fetch(`${base}/d/demo/`, { headers: { cookie: sessionCookie("U-flaky") } });
+    assert.equal(app.status, 503);
+    const impersonate = await fetch(`${base}/auth/impersonate?target=U2`, {
+      method: "POST",
+      headers: { cookie: sessionCookie("U-flaky"), origin: PUBLIC },
+    });
+    assert.equal(impersonate.status, 503);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("web-ui /app-edit drops x-frame-options so its own frame-ancestors CSP can allow the app origin", async () => {
   const editPage = await fetch(`${base}/app-edit?slug=demo`, { headers: { cookie: sessionCookie("U1") } });
   assert.equal(editPage.status, 200);
@@ -327,6 +354,47 @@ test("inbound Linear webhooks reach the core with their signature header", async
   assert.equal(r.status, 200);
   const body = (await r.json()) as { headers: Record<string, string> };
   assert.equal(body.headers["linear-signature"], "abc123");
+});
+
+test("partner-chat events reach the core with only their body and signature headers", async () => {
+  const payload = JSON.stringify({ type: "message.created" });
+  const r = await fetch(`${base}/v1/surfaces/partner-chat/events?x=1`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-agent-app-request-timestamp": "1793649600",
+      "x-agent-app-signature": "v0=abc",
+      authorization: "Bearer nope",
+      cookie: sessionCookie("U1"),
+      "x-extra": "1",
+    },
+    body: payload,
+  });
+  assert.equal(r.status, 200);
+  const body = (await r.json()) as { url: string; cookie: string | null; headers: Record<string, string> };
+  assert.equal(body.url, "/v1/surfaces/partner-chat/events");
+  assert.equal(body.cookie, null);
+  assert.deepEqual(
+    Object.fromEntries(
+      [
+        "content-type",
+        "content-length",
+        "x-agent-app-request-timestamp",
+        "x-agent-app-signature",
+        "authorization",
+        "x-extra",
+      ].map((h) => [h, body.headers[h]]),
+    ),
+    {
+      "content-type": "application/json",
+      "content-length": String(Buffer.byteLength(payload)),
+      "x-agent-app-request-timestamp": "1793649600",
+      "x-agent-app-signature": "v0=abc",
+      authorization: undefined,
+      "x-extra": undefined,
+    },
+  );
+  assert.equal((await fetch(`${base}/v1/surfaces/partner-chat/events`)).status, 404);
 });
 
 test("the webhook passthrough is exact-shape + POST-only (no widening of /v1)", async () => {
@@ -715,12 +783,8 @@ test("impersonate: an admin starts it; the web-ui hop carries target + impersona
   assert.match(stop.headers.get("set-cookie") ?? "", /portal_impersonate=;[^,]*Max-Age=0/);
 });
 
-test("background ownership forwards both credentials only on its exact control routes", async () => {
-  for (const [method, path] of [
-    ["GET", "/v1/background-work"],
-    ["POST", "/v1/background-work"],
-    ["POST", "/v1/deployment/live-session"],
-  ]) {
+test("the deployment live session forwards both credentials only on its exact route", async () => {
+  for (const [method, path] of [["POST", "/v1/deployment/live-session"]]) {
     const response = await fetch(`${base}${path}`, {
       method,
       headers: {
@@ -742,8 +806,6 @@ test("background ownership forwards both credentials only on its exact control r
     if (method === "POST") assert.equal(payload.body, '{"expectedGeneration":0}');
   }
   for (const [method, path] of [
-    ["PUT", "/v1/background-work"],
-    ["GET", "/v1/background-work/nearby"],
     ["GET", "/v1/deployment/live-session"],
     ["POST", "/v1/deployment/live-session/nearby"],
   ]) {

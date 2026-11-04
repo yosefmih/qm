@@ -1,6 +1,6 @@
 import { SandboxSnapshotNotFoundError } from "@renderinc/sdk";
-import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
+import { inTenantOf } from "../tenants/claim.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { CredentialPathSpec } from "../credentials/resident-paths.ts";
 import { ephemeralCredLinkPaths } from "../credentials/resident-paths.ts";
@@ -73,7 +73,7 @@ export interface RenderSandboxOptions extends BlobStagingOptions {
   onError?: (e: { category: string; code: string; message: string; scopeLabel?: string }) => void;
 }
 
-export function createRenderSandbox(workspace: WorkspaceStore, opts: RenderSandboxOptions): Sandbox {
+export function createRenderSandbox(opts: RenderSandboxOptions): Sandbox {
   const { client, store, scratchStore, cleanupStore, advisoryLock, base: goldens } = opts;
   const prefix = opts.namePrefix ?? "qm";
   const homeDir = opts.homeDir ?? "/root";
@@ -419,7 +419,6 @@ export function createRenderSandbox(workspace: WorkspaceStore, opts: RenderSandb
   }
 
   const base = createExecSandboxBase({
-    workspace,
     label: "render",
     prefix,
     homeDir,
@@ -505,11 +504,8 @@ export function createRenderSandbox(workspace: WorkspaceStore, opts: RenderSandb
         },
       },
     },
-    async provision(layers, options) {
-      const writable = layers.find((layer) => layer.mode === "rw") ?? layers[0];
-      const name = options?.scratch
-        ? sandboxScopeName(`${prefix}-scratch`, options.scratch.key)
-        : nameFor(writable?.scopeId ?? "default");
+    async provision(scope, options) {
+      const name = options?.scratch ? sandboxScopeName(`${prefix}-scratch`, options.scratch.key) : nameFor(scope);
       await goldens.ready(options?.onStatus);
       return withLifecycle(name, async () => {
         if (options?.scratch) {
@@ -521,7 +517,7 @@ export function createRenderSandbox(workspace: WorkspaceStore, opts: RenderSandb
         }
         let handle: SandboxHandle;
         try {
-          handle = await base.provision(layers, options);
+          handle = await base.provision(scope, options);
         } catch (error) {
           const temporary = scratch.get(name);
           if (error instanceof SandboxProvisionCleanupError && temporary) error.handle.providerSandboxId = temporary.id;
@@ -596,61 +592,65 @@ export function createRenderSandbox(workspace: WorkspaceStore, opts: RenderSandb
     },
     async reapDeepIdle(idleMs) {
       let reaped = 0;
-      for (const [name, candidate] of await scratchStore.entries()) {
+      for (const { tenantId, id: name, value: candidate } of await scratchStore.acrossTenants()) {
         if (!candidate.cleanupPending && candidate.expiresAtMs > Date.now()) continue;
-        await tryLock(lifecycleKey(name), async () => {
-          const temporary = await scratchStore.get(name);
-          if (!temporary || (!temporary.cleanupPending && temporary.expiresAtMs > Date.now())) return;
-          await destroyScratch(name);
-          reaped++;
-        }).catch((error) => reportError("scratch_cleanup_failed", error));
+        await inTenantOf(tenantId, () =>
+          tryLock(lifecycleKey(name), async () => {
+            const temporary = await scratchStore.get(name);
+            if (!temporary || (!temporary.cleanupPending && temporary.expiresAtMs > Date.now())) return;
+            await destroyScratch(name);
+            reaped++;
+          }),
+        ).catch((error) => reportError("scratch_cleanup_failed", error));
       }
       const cutoff = Date.now() - Math.min(idleMs > 0 ? idleMs : Infinity, RENDER_IDLE_STOP_MS);
       const stale = (stored: StoredRenderSandbox): boolean => stored.homeDirty !== false && !recentlySaved(stored);
       const due = (stored: StoredRenderSandbox): boolean =>
         !stored.stopped && (stored.expiresAtMs <= Date.now() || stored.lastActivityMs <= cutoff || stale(stored));
-      for (const [scope] of await cleanupStore.entries())
-        await tryLock(lifecycleKey(nameFor(scope)), () => finishCleanup(scope)).catch(
+      for (const { tenantId, id: scope } of await cleanupStore.acrossTenants())
+        await inTenantOf(tenantId, () => tryLock(lifecycleKey(nameFor(scope)), () => finishCleanup(scope))).catch(
           swallowAs(`render-sandbox: finish cleanup of ${scope}`, undefined),
         );
-      for (const [scope, candidate] of await store.entries()) {
+      for (const { tenantId, id: scope, value: candidate } of await store.acrossTenants()) {
         if (!due(candidate) && !candidate.retiredResources?.length) continue;
         const name = nameFor(scope);
-        await tryLock(lifecycleKey(name), async () => {
-          let stored = await store.get(scope);
-          if (stored) stored = await cleanupRetired(scope, stored);
-          if (!stored || !due(stored)) return;
-          const info = await client.get(stored.sandboxId);
-          if (!info || info.status === "terminated" || info.status === "errored") {
-            if (stored.expiresAtMs > Date.now())
-              reportError(
-                "computer_ended",
-                new Error(`Render sandbox ${stored.sandboxId} is ${info?.status ?? "missing"}`),
-                scope,
-              );
-            await store.merge(scope, { stopped: true });
-            return;
-          }
-          if (info.status !== "running") return;
-          const active = await hasLiveProcesses(info.id);
-          if (active && !stale(stored)) return;
-          const current = stored;
-          const stopped =
-            !active &&
-            stored.lastActivityMs <= cutoff &&
-            (await tryUse(name, async () => {
-              if (await hasLiveProcesses(info.id)) return false;
-              await clearCredentials(info.id).catch((error: unknown) =>
-                reportError("credential_clear_failed", error, scope),
-              );
-              await checkpoint(scope, current, false);
-              await client.terminate(info.id);
+        await inTenantOf(tenantId, () =>
+          tryLock(lifecycleKey(name), async () => {
+            let stored = await store.get(scope);
+            if (stored) stored = await cleanupRetired(scope, stored);
+            if (!stored || !due(stored)) return;
+            const info = await client.get(stored.sandboxId);
+            if (!info || info.status === "terminated" || info.status === "errored") {
+              if (stored.expiresAtMs > Date.now())
+                reportError(
+                  "computer_ended",
+                  new Error(`Render sandbox ${stored.sandboxId} is ${info?.status ?? "missing"}`),
+                  scope,
+                );
               await store.merge(scope, { stopped: true });
-              return true;
-            }));
-          if (stopped) reaped++;
-          else await checkpoint(scope, stored, active || undefined);
-        }).catch((error) => reportError("idle_checkpoint_failed", error, scope));
+              return;
+            }
+            if (info.status !== "running") return;
+            const active = await hasLiveProcesses(info.id);
+            if (active && !stale(stored)) return;
+            const current = stored;
+            const stopped =
+              !active &&
+              stored.lastActivityMs <= cutoff &&
+              (await tryUse(name, async () => {
+                if (await hasLiveProcesses(info.id)) return false;
+                await clearCredentials(info.id).catch((error: unknown) =>
+                  reportError("credential_clear_failed", error, scope),
+                );
+                await checkpoint(scope, current, false);
+                await client.terminate(info.id);
+                await store.merge(scope, { stopped: true });
+                return true;
+              }));
+            if (stopped) reaped++;
+            else await checkpoint(scope, stored, active || undefined);
+          }),
+        ).catch((error) => reportError("idle_checkpoint_failed", error, scope));
       }
       return { reaped };
     },

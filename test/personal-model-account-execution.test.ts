@@ -41,7 +41,7 @@ for (const provider of ["anthropic", "openai"] as const) {
       actor: { externalId: "U1" },
       conversation: { kind: "dm", threadRef: `execute-personal-${provider}` },
       text: "hello",
-      liveActor: true,
+      origin: { kind: "human" },
       async: true,
     });
     await built.config.setPersonalModelAuth("U1", false);
@@ -69,7 +69,7 @@ test("disconnecting a queued personal account fails without invoking any main ag
     actor: { externalId: "U1" },
     conversation: { kind: "dm", threadRef: "execute-disconnected-personal" },
     text: "hello",
-    liveActor: true,
+    origin: { kind: "human" },
     async: true,
   });
   await built.userModelCredentials.delete("U1", "openai");
@@ -98,7 +98,7 @@ for (const account of ["personal", "openai", "anthropic"] as const) {
       actor: { externalId: "U1" },
       conversation: { kind: "dm", threadRef: `web:U1:picker-${account}` },
       text: "hello",
-      liveActor: true,
+      origin: { kind: "human" },
       async: true,
       model,
       thinkingLevel: "high",
@@ -135,11 +135,15 @@ test("personal web selections reject wrong providers, policy exclusions and disc
       actor: { externalId: "U1" },
       conversation: { kind: "dm", threadRef: `web:U1:invalid-${crypto.randomUUID()}` },
       text: "hello",
-      liveActor: true,
+      origin: { kind: "human" },
       async: true,
       model,
     });
-  for (const model of ["claude-sonnet-5", "unknown"]) assert.equal((await submit(model)).status, "refused");
+  for (const model of ["claude-sonnet-5", "unknown"])
+    assert.deepEqual(await submit(model), {
+      status: "refused",
+      reason: "Your connected AI account cannot serve this model.",
+    });
   await built.config.setWebuiModels("org:default-org", ["gpt-5.6-sol"]);
   assert.equal((await submit("gpt-5.6-terra")).status, "refused");
   await built.userModelCredentials.delete("U1", "openai");
@@ -157,7 +161,7 @@ test("a queued web selection cannot fall back to another personal provider after
     actor: { externalId: "U1" },
     conversation: { kind: "dm", threadRef: "web:U1:disconnect-after-pick" },
     text: "hello",
-    liveActor: true,
+    origin: { kind: "human" },
     async: true,
     model: "gpt-5.6-terra",
   });
@@ -187,7 +191,7 @@ test("web subscription selections use the namespaced model and personal OAuth on
     actor: { externalId: "U1" },
     conversation: { kind: "dm", threadRef: "web:U1:oauth-picker" },
     text: "hello",
-    liveActor: true,
+    origin: { kind: "human" },
     async: true,
     model: "codex/gpt-5.6-terra",
     thinkingLevel: "high",
@@ -233,7 +237,7 @@ test("a company ChatGPT login feeds pi's subscription provider while personal Ch
     actor: { externalId: "U1" },
     conversation: { kind: "dm", threadRef: "legacy-bare-pin" },
     text: "hello",
-    liveActor: true,
+    origin: { kind: "human" },
     async: true,
   });
   assert.ok(submitted.runId, JSON.stringify(submitted));

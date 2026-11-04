@@ -1,3 +1,4 @@
+import { TENANT_HEADER } from "../../chassis/src/source-auth-sign.ts";
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { signedHeaders } from "../../chassis/src/core-client.ts";
 import { withVary } from "../../chassis/src/http.ts";
@@ -59,6 +60,10 @@ function relay(
     forwardCookies?: boolean;
   },
 ): void {
+  const headers = { ...target.headers };
+  const length = req.headers["content-length"];
+  if (length !== undefined) headers["content-length"] = length;
+  else if (req.headers["transfer-encoding"] !== undefined) headers["transfer-encoding"] = "chunked";
   const up = httpRequest(
     {
       protocol: target.protocol,
@@ -66,7 +71,7 @@ function relay(
       port: target.port,
       method: req.method,
       path: target.path,
-      headers: target.headers,
+      headers,
     },
     (upRes) => {
       const out: Record<string, string | string[]> = {};
@@ -108,6 +113,7 @@ export interface SurfaceTarget {
   impersonator?: string;
   identitySecret?: string;
   authenticatedPrincipal?: string;
+  forwardedHost?: string;
   nowMs?: number;
 }
 
@@ -117,7 +123,11 @@ export function proxyToSurface(req: IncomingMessage, res: ServerResponse, t: Sur
     `${t.cookieName}=${encodeURIComponent(t.principal)}` +
     (t.displayName ? `; ${t.cookieName}_name=${encodeURIComponent(t.displayName)}` : "") +
     (t.impersonator ? `; webui_impersonator=${encodeURIComponent(t.impersonator)}` : "");
-  const base: Record<string, string> = { host: upstream.host, cookie };
+  const base: Record<string, string> = {
+    host: upstream.host,
+    cookie,
+    ...(t.forwardedHost ? { "x-forwarded-host": t.forwardedHost } : {}),
+  };
   if (t.identitySecret) {
     const now = t.nowMs ?? Date.now();
     base[PORTAL_IDENTITY_HEADER] = mintPortalIdentity(
@@ -158,7 +168,6 @@ export const FORWARD_WEBHOOK_HEADERS = [
 
 export const FORWARD_AGENT_API_HEADERS = [
   "content-type",
-  "content-length",
   "accept",
   "accept-encoding",
   "x-agent-capability",
@@ -166,13 +175,7 @@ export const FORWARD_AGENT_API_HEADERS = [
   "git-protocol",
 ];
 
-export const FORWARD_DEPLOYMENT_LAYER_HEADERS = [
-  "content-type",
-  "content-length",
-  "accept",
-  "x-timestamp",
-  "x-signature",
-];
+export const FORWARD_DEPLOYMENT_LAYER_HEADERS = ["content-type", "accept", "x-timestamp", "x-signature"];
 
 export const FORWARD_DEPLOYMENT_GIT_HEADERS = [
   "authorization",
@@ -250,7 +253,7 @@ export function proxyToUpstream(
   });
 }
 
-export const FORWARD_BROKER_HEADERS = ["accept", "accept-language", "user-agent", "content-type", "content-length"];
+export const FORWARD_BROKER_HEADERS = ["accept", "accept-language", "user-agent", "content-type"];
 
 export function proxyToAppHost(req: IncomingMessage, res: ServerResponse, coreBase: string, clientIp?: string): void {
   const upstream = new URL(coreBase);
@@ -261,6 +264,7 @@ export function proxyToAppHost(req: IncomingMessage, res: ServerResponse, coreBa
     "x-as-principal",
     "x-admin-actor",
     "x-agent-capability",
+    TENANT_HEADER,
     PORTAL_IDENTITY_HEADER,
     "x-qm-app-host",
     "x-qm-client-ip",

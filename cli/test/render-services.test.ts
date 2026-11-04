@@ -192,7 +192,6 @@ test("Render core receives scoped storage credentials and assigned URLs", (t) =>
   assert.equal(core.DATABASE_URL, connections.databaseUrl);
   assert.equal(core.CORE_SIGNING_SECRET, "qm-signing-key");
   assert.equal(core.WORKERS, undefined);
-  assert.equal(core.WORKSPACE_STORE, "postgres");
   for (const service of ["core", "reports"]) {
     const env = renderServiceEnv(config, service, values, wired);
     assert.equal(env.CORE_API_URL, connections.coreUrl);

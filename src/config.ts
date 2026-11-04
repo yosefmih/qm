@@ -1,4 +1,6 @@
 import { isClaudeSubscriptionToken } from "./model/claude-subscription.ts";
+import { cacheTenant, isInstallTenant } from "./tenants/context.ts";
+import { loadedTenantSettings, tenantSettingsLoaded } from "./tenants/settings.ts";
 import {
   deploymentBrokerCredentialsFromEnv,
   type DeploymentBrokerCredential,
@@ -7,10 +9,11 @@ import { boolEnv, boolEnvStrict, numEnvStrict, optNum } from "./util/env.ts";
 import { sandboxSettings, type SandboxSettings } from "./sandbox/sandbox-settings.ts";
 import { deploySettings, type DeploySettings } from "./deploy/deploy-settings.ts";
 import type { ExternalSlackPolicies } from "./resolution/external-slack.ts";
-import { isBearerSecret, isStrongSigningSecret } from "./auth/source-auth.ts";
+import { isStrongSigningSecret } from "./auth/source-auth.ts";
 import { parseSandboxCapabilityTtlMs } from "./auth/capability-token.ts";
 import { existsSync, readdirSync } from "node:fs";
 import {
+  MODEL_REQUEST_CONTEXT_HEADERS,
   parseProviderBaseUrl,
   providerBaseUrlsFromEnv,
   type ModelGatewayTransportConfig,
@@ -64,10 +67,9 @@ export interface Config extends SandboxSettings, DeploySettings {
   databaseUrl?: string;
   databaseCaCert?: string;
   databaseCaCertFile?: string;
+  databaseOwnerUrl?: string;
   databasePoolUrl?: string;
   databasePoolCaCert?: string;
-  databasePoolMax?: number;
-  databaseDirectPoolMax?: number;
   securityPosture: SecurityPosture;
   sharingPosture: SharingPosture;
   egressServiceHosts?: string[];
@@ -92,8 +94,6 @@ export interface Config extends SandboxSettings, DeploySettings {
   emailAuthDomain?: string;
   resendApiKey?: string;
   emailFrom?: string;
-  rateLimitPerWindow: number;
-  rateLimitWindowMs: number;
   budgetUsdPerWindow?: number;
   orgBudgetUsdPerWindow?: number;
   budgetWindowMs: number;
@@ -109,18 +109,19 @@ export interface Config extends SandboxSettings, DeploySettings {
   backgroundWorkEnabled: boolean;
   backgroundDeploymentId?: string;
   deploymentControlSecret?: string;
-  spendExportToken?: string;
   buildSha?: string;
   monitorPollMs: number;
   skillSyncPollMs: number;
   monitorHeartbeatMs: number;
   signingSecret?: string;
+  operatorSigningSecret?: string;
   capabilitySecret?: string;
   capabilityTokenCompression?: boolean;
   portalIdentitySecret?: string;
   requireSignedPortalIdentity?: boolean;
   connectorSecretKey?: string;
   slackEventsPort?: number;
+  partnerChat?: { url: string; secret: string; label?: string };
   secretsBackend: "env" | "aws";
   secretsPrefix: string;
   apiBaseUrl?: string;
@@ -137,7 +138,6 @@ export interface Config extends SandboxSettings, DeploySettings {
   layerEnv?: Readonly<Record<string, string | undefined>>;
   snapshotStore: "local" | "s3";
   transferStore: "local" | "s3";
-  workspaceStore: "local" | "postgres";
   s3Bucket?: string;
   s3Region?: string;
   s3Endpoint?: string;
@@ -163,7 +163,6 @@ export interface Config extends SandboxSettings, DeploySettings {
   maxClaims: number;
   processReaperIntervalMs: number;
   approvalSummaryTimeoutMs: number;
-  turnLeaseWaitMs: number;
   securityScreenTimeoutMs: number;
   securityScreen: SecurityScreenMode;
   securityScreenClassifier: "model" | "proxy";
@@ -172,7 +171,6 @@ export interface Config extends SandboxSettings, DeploySettings {
     endpoint: string;
     token: string;
   };
-  reachExecEnabled: boolean;
   surfaceDebugFooter: boolean;
 }
 
@@ -209,8 +207,16 @@ export function companySubscriptionAuth(config: Config): ModelProvider | undefin
 
 const DEFAULT_ORG_ID = "default-org";
 
+export function tenantOrgId(fallback: string): string {
+  const configured = loadedTenantSettings().orgId;
+  if (configured) return configured;
+  if (isInstallTenant()) return fallback;
+  if (!tenantSettingsLoaded()) throw new Error("This tenant's settings are not loaded for this work");
+  return cacheTenant();
+}
+
 export function orgId(): string {
-  return process.env.ORG_ID ?? DEFAULT_ORG_ID;
+  return tenantOrgId(process.env.ORG_ID ?? DEFAULT_ORG_ID);
 }
 
 export function orgScope(): string {
@@ -219,8 +225,6 @@ export function orgScope(): string {
 
 export const CONFIG_DEFAULTS = {
   port: 8080,
-  rateLimitPerWindow: 60,
-  rateLimitWindowMs: 60_000,
   budgetWindowMs: 86_400_000,
   execTimeoutDefaultSec: 120,
   execTimeoutMaxSec: 300,
@@ -237,7 +241,6 @@ export const CONFIG_DEFAULTS = {
   cronFireConcurrency: 4,
   monitorHeartbeatSec: 180,
   approvalSummaryTimeoutMs: 6_000,
-  turnLeaseWaitMs: 5_000,
   securityScreenTimeoutMs: 15_000,
   workers: 16,
   leaseTtlMs: 120_000,
@@ -317,6 +320,9 @@ export function modelGatewayFromEnv(env: NodeJS.ProcessEnv): ModelGatewayTranspo
   if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(apiKeyHeader)) {
     throw new Error("MODEL_GATEWAY_API_KEY_HEADER must be a valid HTTP header name");
   }
+  if (Object.hasOwn(MODEL_REQUEST_CONTEXT_HEADERS, apiKeyHeader.toLowerCase())) {
+    throw new Error("MODEL_GATEWAY_API_KEY_HEADER cannot be a QM request context header");
+  }
   const models: Record<string, string> = {};
   for (const mapping of env.MODEL_GATEWAY_MODELS?.trim() ? env.MODEL_GATEWAY_MODELS.split(",") : []) {
     const separator = mapping.indexOf("=");
@@ -382,25 +388,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         "AWS_ENDPOINT_URL_S3 must be an HTTP or HTTPS URL without credentials, query parameters, or a fragment",
       );
   }
-  const token = env.SPEND_EXPORT_TOKEN;
-  if (token) {
-    const reused = Object.entries(env).some(([name, value]) => name !== "SPEND_EXPORT_TOKEN" && value === token);
-    if (!isStrongSigningSecret(token) || !isBearerSecret(token) || reused)
-      throw new Error(
-        "SPEND_EXPORT_TOKEN must be at least 32 characters, have no surrounding whitespace and differ from every other environment value",
-      );
-  }
   if (env.BACKGROUND_DEPLOYMENT_ID !== undefined) {
     if (!env.BACKGROUND_DEPLOYMENT_ID.trim() || env.BACKGROUND_DEPLOYMENT_ID.length > 256)
       throw new Error("BACKGROUND_DEPLOYMENT_ID must be nonempty and at most 256 characters");
-    if (!env.DATABASE_URL) throw new Error("Background ownership requires DATABASE_URL");
     if (
       !isStrongSigningSecret(env.CORE_SIGNING_SECRET) ||
       !isStrongSigningSecret(env.DEPLOYMENT_CONTROL_SECRET) ||
       env.DEPLOYMENT_CONTROL_SECRET === env.CORE_SIGNING_SECRET
     )
       throw new Error(
-        "Background ownership requires a distinct DEPLOYMENT_CONTROL_SECRET of at least 32 characters and CORE_SIGNING_SECRET",
+        "BACKGROUND_DEPLOYMENT_ID requires a distinct DEPLOYMENT_CONTROL_SECRET of at least 32 characters and CORE_SIGNING_SECRET",
       );
   }
   const swarmDefaults = resolveSwarmSettings(
@@ -489,6 +486,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   );
   const slackEventsPort =
     env.SLACK_EVENTS_MODE?.trim() === "http" ? numEnvStrict("SLACK_EVENTS_PORT", env.SLACK_EVENTS_PORT) : undefined;
+  if (Boolean(env.PARTNER_CHAT_URL?.trim()) !== Boolean(env.PARTNER_CHAT_SECRET?.trim()))
+    throw new Error("PARTNER_CHAT_URL and PARTNER_CHAT_SECRET must be set together");
   if (
     slackEventsPort !== undefined &&
     (!Number.isSafeInteger(slackEventsPort) || slackEventsPort <= 0 || slackEventsPort > 65_535)
@@ -511,12 +510,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ? { productAnalytics: { apiKey: env.POSTHOG_API_KEY.trim(), host: env.POSTHOG_HOST?.trim() } }
       : {}),
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
+    ...(env.DATABASE_OWNER_URL ? { databaseOwnerUrl: env.DATABASE_OWNER_URL } : {}),
     ...(env.DATABASE_POOL_URL ? { databasePoolUrl: env.DATABASE_POOL_URL } : {}),
     ...(env.DATABASE_POOL_CA_CERT ? { databasePoolCaCert: env.DATABASE_POOL_CA_CERT } : {}),
-    ...(env.DATABASE_POOL_MAX ? { databasePoolMax: numEnvStrict("DATABASE_POOL_MAX", env.DATABASE_POOL_MAX) } : {}),
-    ...(env.DATABASE_DIRECT_POOL_MAX
-      ? { databaseDirectPoolMax: numEnvStrict("DATABASE_DIRECT_POOL_MAX", env.DATABASE_DIRECT_POOL_MAX) }
-      : {}),
     ...(env.DATABASE_CA_CERT ? { databaseCaCert: env.DATABASE_CA_CERT } : {}),
     ...(env.DATABASE_CA_CERT_FILE ? { databaseCaCertFile: env.DATABASE_CA_CERT_FILE } : {}),
     securityPosture: securityPostureEnvStrict(env.HARNESS_SECURITY_POSTURE),
@@ -566,10 +562,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.RESEND_API_KEY?.trim() ? { resendApiKey: env.RESEND_API_KEY.trim() } : {}),
     ...(env.AUTH_EMAIL_FROM?.trim() ? { emailFrom: env.AUTH_EMAIL_FROM.trim() } : {}),
     captureLlmRequests: boolEnvStrict("PI_CAPTURE_REQUESTS", env.PI_CAPTURE_REQUESTS) ?? true,
-    rateLimitPerWindow:
-      numEnvStrict("RATE_LIMIT_PER_WINDOW", env.RATE_LIMIT_PER_WINDOW) ?? CONFIG_DEFAULTS.rateLimitPerWindow,
-    rateLimitWindowMs:
-      numEnvStrict("RATE_LIMIT_WINDOW_MS", env.RATE_LIMIT_WINDOW_MS) ?? CONFIG_DEFAULTS.rateLimitWindowMs,
     ...optNum(env, "BUDGET_USD_PER_WINDOW", "budgetUsdPerWindow"),
     ...optNum(env, "ORG_BUDGET_USD_PER_WINDOW", "orgBudgetUsdPerWindow"),
     budgetWindowMs: numEnvStrict("BUDGET_WINDOW_MS", env.BUDGET_WINDOW_MS) ?? CONFIG_DEFAULTS.budgetWindowMs,
@@ -596,13 +588,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.BACKGROUND_DEPLOYMENT_ID
       ? { backgroundDeploymentId: env.BACKGROUND_DEPLOYMENT_ID, deploymentControlSecret: env.DEPLOYMENT_CONTROL_SECRET }
       : {}),
-    ...(env.SPEND_EXPORT_TOKEN ? { spendExportToken: env.SPEND_EXPORT_TOKEN } : {}),
     ...(env.GIT_SHA ? { buildSha: env.GIT_SHA } : {}),
     monitorPollMs: numEnvStrict("MONITOR_POLL_MS", env.MONITOR_POLL_MS) ?? CONFIG_DEFAULTS.monitorPollMs,
     skillSyncPollMs: numEnvStrict("SKILL_SYNC_POLL_MS", env.SKILL_SYNC_POLL_MS) ?? CONFIG_DEFAULTS.skillSyncPollMs,
     monitorHeartbeatMs:
       (numEnvStrict("MONITOR_HEARTBEAT_SEC", env.MONITOR_HEARTBEAT_SEC) ?? CONFIG_DEFAULTS.monitorHeartbeatSec) * 1000,
     ...(env.CORE_SIGNING_SECRET ? { signingSecret: env.CORE_SIGNING_SECRET } : {}),
+    ...(env.OPERATOR_SIGNING_SECRET ? { operatorSigningSecret: env.OPERATOR_SIGNING_SECRET } : {}),
     ...((env.CAPABILITY_SECRET ?? env.CORE_SIGNING_SECRET)
       ? { capabilitySecret: env.CAPABILITY_SECRET ?? env.CORE_SIGNING_SECRET }
       : {}),
@@ -614,6 +606,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     requireSignedPortalIdentity: env.REQUIRE_SIGNED_PORTAL_IDENTITY === "1",
     ...(env.CONNECTOR_SECRET_KEY ? { connectorSecretKey: env.CONNECTOR_SECRET_KEY } : {}),
     ...(slackEventsPort !== undefined ? { slackEventsPort } : {}),
+    ...(env.PARTNER_CHAT_URL?.trim() && env.PARTNER_CHAT_SECRET?.trim()
+      ? {
+          partnerChat: {
+            url: env.PARTNER_CHAT_URL.trim(),
+            secret: env.PARTNER_CHAT_SECRET.trim(),
+            ...(env.PARTNER_CHAT_LABEL?.trim() ? { label: env.PARTNER_CHAT_LABEL.trim() } : {}),
+          },
+        }
+      : {}),
     secretsBackend: secretsBackendEnvStrict(env.SECRETS_BACKEND, env.SECRETS_PREFIX ?? ""),
     secretsPrefix: env.SECRETS_PREFIX ?? "",
     layerEnv: { ...env },
@@ -644,7 +645,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       numEnvStrict("MEMORY_CAPTURE_QUIET_MS", env.MEMORY_CAPTURE_QUIET_MS) ?? DEFAULT_CAPTURE_QUIET_MS,
     ...optNum(env, "MEMORY_CAPTURE_MAX_TURNS", "memoryCaptureMaxTurns"),
     snapshotStore: env.SNAPSHOT_STORE === "s3" ? "s3" : "local",
-    workspaceStore: env.WORKSPACE_STORE === "postgres" ? "postgres" : "local",
     transferStore: env.TRANSFER_STORE === "s3" ? "s3" : "local",
     ...(env.S3_BUCKET ? { s3Bucket: env.S3_BUCKET } : {}),
     ...(env.S3_REGION ? { s3Region: env.S3_REGION } : {}),
@@ -674,9 +674,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     approvalSummaryTimeoutMs:
       numEnvStrict("APPROVAL_SUMMARY_TIMEOUT_MS", env.APPROVAL_SUMMARY_TIMEOUT_MS) ??
       CONFIG_DEFAULTS.approvalSummaryTimeoutMs,
-    turnLeaseWaitMs: numEnvStrict("TURN_LEASE_WAIT_MS", env.TURN_LEASE_WAIT_MS) ?? CONFIG_DEFAULTS.turnLeaseWaitMs,
     securityScreenTimeoutMs,
-    reachExecEnabled: boolEnvStrict("REACH_EXEC", env.REACH_EXEC) ?? false,
     surfaceDebugFooter: boolEnvStrict("SURFACE_DEBUG_FOOTER", env.SURFACE_DEBUG_FOOTER) ?? false,
     ...sandbox,
     ...deploy,

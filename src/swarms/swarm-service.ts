@@ -11,6 +11,8 @@ import type { SessionStore } from "../sessions/session-store.ts";
 import { conversationScope } from "../resolution/resolution-service.ts";
 import { sleep, withTimeout } from "../util/async.ts";
 import { createSweeper } from "../util/sweeper.ts";
+import { inTenantOf, type Claimed } from "../tenants/claim.ts";
+import { withoutTenant } from "../tenants/context.ts";
 import { canonicalJson } from "../../cli/src/canonical-json.ts";
 import { resolveSwarmSettings, type SwarmSettings } from "./swarm-settings.ts";
 import { inheritRuntime, spawnRuntime, type SpawnRuntimeFields, type SwarmTemplate } from "./swarm-runtime.ts";
@@ -19,9 +21,12 @@ import { goalFromParams, GoalCreateParams, type GoalCreateInput } from "../agent
 import { Check } from "typebox/value";
 import {
   assertSwarmOpen,
+  controlState,
+  memberById,
   SWARM_LIMITS,
   swarmExpired,
   type Swarm,
+  type SwarmControlState,
   type SwarmMember,
   type SwarmMessage,
   type SwarmStore,
@@ -137,32 +142,6 @@ function jsonContext(value: unknown, max: number): unknown {
   return JSON.parse(encoded) as unknown;
 }
 
-type SwarmControlState = "active" | "paused" | "stopped";
-
-const memberIndex = new WeakMap<SwarmMember[], Map<string, SwarmMember>>();
-
-function memberById(swarm: Swarm, id: string): SwarmMember | undefined {
-  let index = memberIndex.get(swarm.members);
-  if (!index || index.size !== swarm.members.length) {
-    index = new Map(swarm.members.map((member) => [member.id, member]));
-    memberIndex.set(swarm.members, index);
-  }
-  return index.get(id);
-}
-
-function controlState(swarm: Swarm, memberId: string): SwarmControlState {
-  let state: SwarmControlState = "active";
-  const seen = new Set<string>();
-  for (let id: string | undefined = memberId; id && !seen.has(id);) {
-    seen.add(id);
-    const member = memberById(swarm, id);
-    if (member?.control === "stopped") return "stopped";
-    if (member?.control === "paused") state = "paused";
-    id = member?.parentId;
-  }
-  return state;
-}
-
 function signature(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
@@ -201,9 +180,9 @@ function matchesDispatch(input: OrchestratorInput, expected: OrchestratorInput):
     runLeaseToken: true,
     attempt: true,
     finalAttempt: true,
-    background: true,
     cancel: true,
     shutdown: true,
+    park: true,
     runStartedAt: true,
     resumeCause: true,
   };
@@ -406,15 +385,17 @@ export function createSwarmService(deps: {
         const recipient = memberById(swarm, recipientId);
         if (!recipient || recipient.state === "reserved") continue;
         const control = controlState(swarm, recipient.id);
-        if (control === "paused") continue;
         if (recipient.state === "failed" || control === "stopped" || swarmExpired(swarm)) {
           await step(() =>
             store.update(swarm.id, (current) => {
-              current.messages.find((item) => item.id === message.id)!.notifications[recipientId] = { state: "failed" };
+              const notifications = current.messages.find((item) => item.id === message.id)!.notifications;
+              const held = notifications[recipientId];
+              if (held?.state === "pending") notifications[recipientId] = { ...held, state: "failed" };
             }),
           );
           continue;
         }
+        if (control === "paused") continue;
         const request = dispatchRequest(swarm, message, recipient);
         const { run } = await step(() =>
           runs.enqueue({
@@ -555,7 +536,7 @@ export function createSwarmService(deps: {
     resources: new Map<string, Promise<void>>(),
     delivery: new Map<string, Promise<void>>(),
   };
-  async function reconcileBatch(batch: Swarm[], phase: keyof typeof reconciling): Promise<void> {
+  async function reconcileBatch(batch: Array<Claimed<Swarm>>, phase: keyof typeof reconciling): Promise<void> {
     const active = reconciling[phase];
     const remaining = batch.values();
     await Promise.all(
@@ -568,7 +549,7 @@ export function createSwarmService(deps: {
           )
             continue;
           if (active.size >= SWARM_LIMITS.sweepConcurrency) return;
-          const operation = reconcile(swarm.id, phase)
+          const operation = inTenantOf(swarm.tenantId, () => reconcile(swarm.id, phase))
             .catch((error) => swallow("swarm outbox reconciliation", error))
             .finally(() => {
               active.delete(swarm.id);
@@ -581,20 +562,21 @@ export function createSwarmService(deps: {
       }),
     );
   }
-  const sweep = (): Promise<void> => {
-    sweeping ??= (async () => {
-      selecting ??= store.pending(afterId).finally(() => {
-        selecting = undefined;
+  const sweep = (): Promise<void> =>
+    withoutTenant(() => {
+      sweeping ??= (async () => {
+        selecting ??= store.pending(afterId).finally(() => {
+          selecting = undefined;
+        });
+        const batch = await withTimeout(() => selecting!, SWARM_LIMITS.reconcileMs, "swarm pending batch");
+        afterId = batch.length === SWARM_LIMITS.sweepBatch ? batch.at(-1)!.id : undefined;
+        await reconcileBatch(batch, "resources");
+        await reconcileBatch(batch, "delivery");
+      })().finally(() => {
+        sweeping = undefined;
       });
-      const batch = await withTimeout(() => selecting!, SWARM_LIMITS.reconcileMs, "swarm pending batch");
-      afterId = batch.length === SWARM_LIMITS.sweepBatch ? batch.at(-1)!.id : undefined;
-      await reconcileBatch(batch, "resources");
-      await reconcileBatch(batch, "delivery");
-    })().finally(() => {
-      sweeping = undefined;
+      return sweeping;
     });
-    return sweeping;
-  };
   const sweeper = createSweeper(sweep, 2_000, { label: "swarm-outbox", immediate: true });
 
   return {

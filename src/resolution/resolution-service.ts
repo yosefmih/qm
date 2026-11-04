@@ -1,10 +1,11 @@
-import type { Conversation, Principal, Resolution, ScopeId, WorkspaceLayer } from "../types.ts";
+import type { Conversation, Principal, Resolution, ScopeId } from "../types.ts";
+import { tenantOrgId } from "../config.ts";
 import { scopeId } from "../types.ts";
 import { composePolicy, defaultOrgPolicy } from "../policy/command-policy.ts";
 import type { ScopedConfigStore } from "./config-store.ts";
 import type { AclStore } from "../acl/acl-store.ts";
 import { audienceEgressFloor, audienceDeniedFloor } from "./audience-floor.ts";
-import { principalEntitledToScope } from "./context-filter.ts";
+import { entitledScopes } from "./context-filter.ts";
 import { resolveSecurityPolicy, type SecurityScreenMode } from "../security/security-posture.ts";
 
 export interface ResolutionService {
@@ -39,7 +40,7 @@ export function createResolutionService(
   acl: AclStore,
   screening: SecurityScreenMode = "enforce",
 ): ResolutionService {
-  const orgScope = scopeId("org", orgId);
+  const orgScope = () => scopeId("org", tenantOrgId(orgId));
 
   function scopeFor(conversation: Conversation, actor: Principal): ScopeId {
     return conversationScope(conversation, actor.id);
@@ -50,28 +51,22 @@ export function createResolutionService(
     async resolve(conversation, actor, external = false): Promise<Resolution> {
       const scope = scopeFor(conversation, actor);
       const isDm = conversation.kind === "dm";
-      const liveConfigScopes = new Set<ScopeId>([orgScope, scope, scopeId("personal", actor.id)]);
+      const liveConfigScopes = new Set<ScopeId>([orgScope(), scope, scopeId("personal", actor.id)]);
       for (const principal of conversation.audience) {
         liveConfigScopes.add(scopeId("personal", principal.id));
         for (const team of principal.teamIds ?? []) liveConfigScopes.add(scopeId("team", team));
       }
       await config.refreshSecurity([...liveConfigScopes]);
 
-      const layers: WorkspaceLayer[] = [
-        ...(!external ? [{ scopeId: orgScope, mountPath: "global", mode: "ro" as const }] : []),
-        { scopeId: scope, mountPath: "", mode: "rw" },
-      ];
-      if (!external) {
-        for (const tid of (isDm ? actor.teamIds : conversation.teamIds) ?? []) {
-          layers.push({ scopeId: scopeId("team", tid), mountPath: `team-${tid}`, mode: "ro" });
-        }
-      }
+      const readOnlyScopeIds = external
+        ? []
+        : [orgScope(), ...((isDm ? actor.teamIds : conversation.teamIds) ?? []).map((tid) => scopeId("team", tid))];
 
-      const orgSoul = external ? "" : (config.getSoul(orgScope) ?? "");
+      const orgSoul = external ? "" : (config.getSoul(orgScope()) ?? "");
       const scopeSoul = external ? null : config.getSoul(scope);
       const systemPrompt = composeSoul(orgSoul, scopeSoul);
 
-      const orgPolicy = config.getCommandPolicy(orgScope) ?? defaultOrgPolicy();
+      const orgPolicy = config.getCommandPolicy(orgScope()) ?? defaultOrgPolicy();
       const scopePolicy = config.getCommandPolicy(scope) ?? undefined;
       const commandPolicy = composePolicy(orgPolicy, scopePolicy);
       const securityPolicy = resolveSecurityPolicy(await config.getSecurityPostureDurable(scope), screening);
@@ -81,24 +76,26 @@ export function createResolutionService(
       const approvalGrantModes = await config.getApprovalGrantModesDurable(scope);
 
       const egress = {
-        allowedHosts: audienceEgressFloor(conversation.audience, config, orgScope, scope),
-        deniedHosts: audienceDeniedFloor(conversation.audience, config, orgScope, scope),
+        allowedHosts: audienceEgressFloor(conversation.audience, config, orgScope(), scope),
+        deniedHosts: audienceDeniedFloor(conversation.audience, config, orgScope(), scope),
       };
 
       const grantedHandles = external
         ? []
-        : await acl.handlesForAudience(conversation.audience, scope, orgScope, principalEntitledToScope);
+        : await acl.handlesForAudience(conversation.audience, scope, orgScope(), entitledScopes);
 
       return {
-        layers,
+        writableScopeId: scope,
+        readOnlyScopeIds,
         systemPrompt,
         egress,
         commandPolicy,
         securityPolicy,
         sharingPosture,
         approvalGrantModes,
-        orgScopeId: orgScope,
+        orgScopeId: orgScope(),
         grantedHandles,
+        ...(scopeSoul?.trim() ? { guidance: scopeSoul } : {}),
       };
     },
   };

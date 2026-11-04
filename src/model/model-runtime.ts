@@ -29,6 +29,7 @@ import {
   ModelUnavailableError,
   modelGatewayRequest,
   type ModelGatewayTransportConfig,
+  type ModelRequestPurpose,
 } from "./provider-endpoints.ts";
 import {
   CODEX_SUBSCRIPTION_PROVIDER,
@@ -38,6 +39,7 @@ import {
   resolveModel,
 } from "./pi-models.ts";
 import { providerTurnError } from "./provider-error.ts";
+import { perTenant } from "../tenants/context.ts";
 
 export function piUsageToCallUsage(
   u: Partial<Usage> | undefined,
@@ -93,10 +95,11 @@ export interface ProviderKeys {
   [provider: string]: string | undefined;
 }
 
-let cachedCustomModels: { version: number; path: string | null } | null = null;
+const customModelFiles = perTenant<{ cached?: { version: string; path: string | null } }>(() => ({}));
 function customModelsPath(): string | null {
-  const version = customProvidersVersion() + gatewayModelsVersion();
-  if (cachedCustomModels?.version === version) return cachedCustomModels.path;
+  const files = customModelFiles();
+  const version = `${customProvidersVersion()}:${gatewayModelsVersion()}`;
+  if (files.cached?.version === version) return files.cached.path;
   const providers = { ...customModelsJson()?.providers, ...gatewayModelsJson() };
   const custom = Object.keys(providers).length ? { providers } : undefined;
   let path: string | null = null;
@@ -104,13 +107,14 @@ function customModelsPath(): string | null {
     path = join(mkdtempSync(join(tmpdir(), "pi-custom-models-")), "models.json");
     writeFileSync(path, JSON.stringify(custom));
   }
-  cachedCustomModels = { version, path };
+  files.cached = { version, path };
   return path;
 }
 
 export async function buildModelRuntime(
   keys: ProviderKeys | string,
   modelGateway?: ModelGatewayTransportConfig,
+  purpose?: ModelRequestPurpose,
   cacheRetention?: "long",
 ): Promise<ModelRuntime> {
   await modelGateway?.refresh?.();
@@ -138,10 +142,13 @@ export async function buildModelRuntime(
     );
     const hasConfiguredAuth = runtime.hasConfiguredAuth.bind(runtime);
     runtime.hasConfiguredAuth = (provider) => providers.has(provider) || hasConfiguredAuth(provider);
+    const checkAuth = runtime.checkAuth.bind(runtime);
+    runtime.checkAuth = async (provider) =>
+      providers.has(provider) ? { type: "api_key", source: "model gateway" } : checkAuth(provider);
     const getAuth = runtime.getAuth.bind(runtime);
     runtime.getAuth = (async (model, overrides) => {
       if (typeof model === "string") return getAuth(model, overrides);
-      const request = modelGatewayRequest(modelGateway, model);
+      const request = modelGatewayRequest(modelGateway, model, purpose);
       if (request)
         return {
           auth: { apiKey: request.apiKey, headers: { ...model.headers, ...request.headers } },
@@ -172,7 +179,7 @@ export async function buildModelRuntime(
     model: Model<Api>,
     options: T,
   ): { model: Model<Api>; options: T } => {
-    const request = modelGatewayRequest(modelGateway, model);
+    const request = modelGatewayRequest(modelGateway, model, purpose);
     if (!request) {
       const custom = resolveCustomModel(model.id);
       const providerModelId =
@@ -211,7 +218,7 @@ export async function buildModelRuntime(
       model: request.model,
       options: wireModelId(routed, model, async () => {
         await modelGateway?.refresh?.();
-        const current = modelGatewayRequest(modelGateway, model);
+        const current = modelGatewayRequest(modelGateway, model, purpose);
         if (!current) throw new GatewayModelUnavailableError(model.id);
         return current.target;
       }),
@@ -241,7 +248,7 @@ export async function probeModel(
   fastMode = false,
   modelGateway?: ModelGatewayTransportConfig,
 ): Promise<void> {
-  const runtime = await buildModelRuntime(keys, modelGateway);
+  const runtime = await buildModelRuntime(keys, modelGateway, "probe");
   signal.throwIfAborted();
   const candidate = withRequestHeaders(model, !modelGateway?.models[model.id], fastMode);
   const response = await runtime

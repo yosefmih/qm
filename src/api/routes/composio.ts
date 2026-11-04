@@ -9,8 +9,9 @@ import { PrincipalLinkError } from "../../identity/principal-links.ts";
 import { createHash } from "node:crypto";
 import { scopeId } from "../../types.ts";
 import { parseRef } from "../../acl/resource-ref.ts";
+import { cacheTenant } from "../../tenants/context.ts";
 import { orgId } from "../../config.ts";
-import { principalEntitledToScope } from "../../resolution/context-filter.ts";
+import { entitledScopes } from "../../resolution/context-filter.ts";
 import { sendJson } from "../http.ts";
 import { redactSecrets } from "../../../plugins/chassis/src/redact-secrets.ts";
 import { createExactSecretValueMasker } from "../../security/secret-masking.ts";
@@ -114,7 +115,7 @@ export async function credential(ctx: ApiCtx): Promise<{ key: string; principal:
       audience,
       ctx.capability?.scopeId ?? personal,
       org,
-      principalEntitledToScope,
+      entitledScopes,
     )) ?? [];
   const allowed = new Set(grants.map((g) => parseRef(g.ref).id));
   const records = ((await ctx.deps.serviceCreds?.listServiceCredentials(org)) ?? []).filter(
@@ -321,13 +322,14 @@ const SCOPES_TTL_MS = 5 * 60_000;
 const scopeCache = new Map<string, { scopes: string[]; expiresAt: number }>();
 
 async function configuredScopes(ctx: ApiCtx, key: string, authConfigId: string): Promise<string[]> {
-  const cached = scopeCache.get(authConfigId);
+  const cacheKey = JSON.stringify([cacheTenant(), authConfigId]);
+  const cached = scopeCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.scopes;
   try {
     const config = await request(ctx, key, `/auth_configs/${encodeURIComponent(authConfigId)}`);
     const listed = (config.credentials as { scopes?: unknown } | undefined)?.scopes;
     const scopes = Array.isArray(listed) ? listed.filter((scope): scope is string => typeof scope === "string") : [];
-    scopeCache.set(authConfigId, { scopes, expiresAt: Date.now() + SCOPES_TTL_MS });
+    scopeCache.set(cacheKey, { scopes, expiresAt: Date.now() + SCOPES_TTL_MS });
     return scopes;
   } catch (error) {
     const mask = createExactSecretValueMasker([key]);
