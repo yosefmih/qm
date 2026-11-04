@@ -73,7 +73,7 @@ export function runAdminLogin(options: { configPath?: string; envFile?: string; 
   const config = loaded?.config;
   note(
     adminLoginUrl({
-      publicUrl: config?.publicUrl ?? secretValue("PORTAL_PUBLIC_URL") ?? "",
+      publicUrl: config?.publicUrl ?? secretValue("PUBLIC_WEB_URL") ?? "",
       secret: secretValue(config?.secretEnv?.core?.PORTAL_SESSION_SECRET ?? "PORTAL_SESSION_SECRET") ?? "",
       adminGrants:
         config?.env.core?.ADMIN_GRANTS ?? secretValue(config?.secretEnv?.core?.ADMIN_GRANTS ?? "ADMIN_GRANTS") ?? "",

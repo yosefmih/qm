@@ -107,14 +107,14 @@ test("virtual-service env folds into the core [env] (core's own block wins)", ()
   const coreToml = derivedTomlFor(config, "core", repoRoot);
   assert.match(
     coreToml,
-    /WEB_UI_PUBLIC_URL = "https:\/\/beta-core\.fly\.dev"/,
+    /PUBLIC_WEB_URL = "https:\/\/beta-core\.fly\.dev"/,
     "env.slack reaches the in-process slack surface on core",
   );
   const coreWins = {
     ...config,
-    env: { ...config.env, core: { ...config.env.core, WEB_UI_PUBLIC_URL: "https://core-wins.example.com" } },
+    env: { ...config.env, core: { ...config.env.core, PUBLIC_WEB_URL: "https://core-wins.example.com" } },
   };
-  assert.match(derivedTomlFor(coreWins, "core", repoRoot), /WEB_UI_PUBLIC_URL = "https:\/\/core-wins\.example\.com"/);
+  assert.match(derivedTomlFor(coreWins, "core", repoRoot), /PUBLIC_WEB_URL = "https:\/\/core-wins\.example\.com"/);
 });
 
 test("a vms override rewrites the core [[vm]] size/memory", () => {

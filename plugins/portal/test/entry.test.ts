@@ -6,7 +6,7 @@ test("boot refuses an own-origin OIDC endpoint when no broker upstream is wired"
   const command = "import('./src/index.ts').then(m => m.bootChecks())";
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    PORTAL_PUBLIC_URL: "https://agent.example.com",
+    PUBLIC_WEB_URL: "https://agent.example.com",
     OIDC_AUTH_ENDPOINT: "https://agent.example.com/idp/authorize",
   };
   delete env.NODE_ENV;
@@ -31,7 +31,7 @@ test("production boot requires an explicit OIDC tenant trust boundary", () => {
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: "production",
-    PORTAL_PUBLIC_URL: "https://agent.example.com",
+    PUBLIC_WEB_URL: "https://agent.example.com",
     PORTAL_SESSION_SECRET: "portal-session-secret",
     CORE_SIGNING_SECRET: "core-signing-secret",
     SKILL_SIGNING_SECRET: "skill-signing-secret",
@@ -73,7 +73,7 @@ test("production boot requires an explicit JWKS URI for custom issuers", () => {
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: "production",
-    PORTAL_PUBLIC_URL: "https://agent.example.com",
+    PUBLIC_WEB_URL: "https://agent.example.com",
     PORTAL_SESSION_SECRET: "portal-session-secret",
     CORE_SIGNING_SECRET: "core-signing-secret",
     OIDC_CLIENT_ID: "client-id",
@@ -106,7 +106,7 @@ test("a session TTL above the default max ceiling still boots, but a contradicto
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: "production",
-    PORTAL_PUBLIC_URL: "https://agent.example.com",
+    PUBLIC_WEB_URL: "https://agent.example.com",
     PORTAL_SESSION_SECRET: "portal-session-secret",
     CORE_SIGNING_SECRET: "core-signing-secret",
     SKILL_SIGNING_SECRET: "skill-signing-secret",
@@ -139,7 +139,7 @@ test("production accepts cleartext OIDC only on private-network hosts, and only 
   const brokerEnv: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: "production",
-    PORTAL_PUBLIC_URL: "https://agent.example.com",
+    PUBLIC_WEB_URL: "https://agent.example.com",
     PORTAL_SESSION_SECRET: "portal-session-secret",
     CORE_SIGNING_SECRET: "core-signing-secret",
     OIDC_CLIENT_ID: "qm-portal",
@@ -191,7 +191,7 @@ test("production serves a cleartext front door only on a loopback address", () =
   const env = (publicUrl: string): NodeJS.ProcessEnv => ({
     ...process.env,
     NODE_ENV: "production",
-    PORTAL_PUBLIC_URL: publicUrl,
+    PUBLIC_WEB_URL: publicUrl,
     PORTAL_SESSION_SECRET: "portal-session-secret",
     CORE_SIGNING_SECRET: "core-signing-secret",
     OIDC_CLIENT_ID: "qm-portal",
@@ -219,7 +219,7 @@ test("production serves a cleartext front door only on a loopback address", () =
   for (const publicUrl of ["http://core:8000", "http://agent.example.com"]) {
     const refused = boot(publicUrl);
     assert.notEqual(refused.status, 0, publicUrl);
-    assert.match(refused.stderr, /PORTAL_PUBLIC_URL must be https in production unless it is a loopback address/);
+    assert.match(refused.stderr, /PUBLIC_WEB_URL must be https in production unless it is a loopback address/);
     assert.match(refused.stderr, /OIDC_AUTH_ENDPOINT must be https unless it is a loopback address/);
   }
 });

@@ -126,7 +126,7 @@ await new Promise<void>((r) => upstream.listen(0, r));
 const upstreamUrl = `http://localhost:${(upstream.address() as AddressInfo).port}`;
 
 const PUBLIC = "http://portal.test";
-process.env.PORTAL_PUBLIC_URL = PUBLIC;
+process.env.PUBLIC_WEB_URL = PUBLIC;
 process.env.PORTAL_SESSION_SECRET = "router-test-portal-secret";
 process.env.CORE_SIGNING_SECRET = "router-test-core-secret";
 process.env.WEB_UI_UPSTREAM = upstreamUrl;

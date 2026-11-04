@@ -44,10 +44,13 @@ export function requestHostname(req: IncomingMessage): string {
   return hostnameOf(req.headers.host ?? "");
 }
 
-// For a server only the in-process front door reaches: resolve the host the front door was asked for.
-export function frontDoorHostTenants(lookup: HostTenantLookup, req: IncomingMessage): HostTenantLookup {
+export function forwardedHostname(req: IncomingMessage): string | undefined {
   const raw = req.headers["x-forwarded-host"];
-  const forwarded = typeof raw === "string" && raw.trim() ? hostnameOf(raw.split(",")[0]!) : undefined;
+  return typeof raw === "string" && raw.trim() ? hostnameOf(raw.split(",")[0]!) : undefined;
+}
+
+export function forwardedHostTenants(lookup: HostTenantLookup, req: IncomingMessage): HostTenantLookup {
+  const forwarded = forwardedHostname(req);
   return (host) => lookup(forwarded ?? host);
 }
 

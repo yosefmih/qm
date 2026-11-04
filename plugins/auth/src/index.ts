@@ -1,4 +1,4 @@
-import { coreHostTenants, inHostTenant } from "../../chassis/src/host-tenant.ts";
+import { coreHostTenants, forwardedHostTenants, inHostTenant } from "../../chassis/src/host-tenant.ts";
 import { coreTenantSignIn } from "../../chassis/src/tenant-sign-in.ts";
 import { reportBackendError } from "../../chassis/src/error-reporting.ts";
 import "./instrument.ts";
@@ -12,7 +12,7 @@ import { createBrandingCache } from "../../chassis/src/branding.ts";
 import { mailerFor } from "./email.ts";
 import { loadSigningKey } from "./keys.ts";
 import { TokenSigner } from "./tokens.ts";
-import { brokerHostTenants, createAuthHandler } from "./server.ts";
+import { createAuthHandler } from "./server.ts";
 
 const IS_PROD = process.env.NODE_ENV === "production";
 const CFG = readConfig(process.env);
@@ -58,7 +58,7 @@ export async function startServer(options: {
   });
   const hostTenants = coreHostTenants(CFG.coreApiUrl, CFG.coreSigningSecret);
   const server = createServer((req, res) => {
-    void inHostTenant(brokerHostTenants(hostTenants, req), req, res, () => handle(req, res), false).catch(
+    void inHostTenant(forwardedHostTenants(hostTenants, req), req, res, () => handle(req, res), false).catch(
       (err: unknown) => {
         reportBackendError(err);
         console.error("[auth] 500 %s %s: %s", req.method ?? "?", (req.url ?? "?").split("?")[0], String(err));

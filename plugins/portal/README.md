@@ -52,7 +52,7 @@ An optional OIDC entry route at `/auth/trusted/login` operates alongside the
 existing `/auth/login` provider. Configure `PORTAL_TRUSTED_OIDC` as JSON with
 `issuer`, `authEndpoint`, `tokenEndpoint`, `userinfoEndpoint`, `jwksUri`, and
 `clientId`; supply its distinct `PORTAL_TRUSTED_OIDC_CLIENT_SECRET` separately.
-Register the exact `${PORTAL_PUBLIC_URL}/auth/trusted/callback` URL at that provider.
+Register the exact `${PUBLIC_WEB_URL}/auth/trusted/callback` URL at that provider.
 Endpoints must use HTTPS in production. This is an operator-configured trust
 relationship: the additional provider must enforce the destination company's
 admission policy before issuing tokens. Primary-provider email and workspace
@@ -91,7 +91,7 @@ Run `qm admin-login` with the deployment's configuration and secrets to generate
 a private admin login URL. Open it and confirm the displayed email. The URL
 expires after five minutes and works once. With multiple email-based
 `ADMIN_GRANTS` administrators, use `qm admin-login --email admin@example.com`.
-The command can also run with `PORTAL_PUBLIC_URL`, `PORTAL_SESSION_SECRET`, and
+The command can also run with `PUBLIC_WEB_URL`, `PORTAL_SESSION_SECRET`, and
 `ADMIN_GRANTS` in its environment, without a deployment config file.
 
 `GET /auth/admin-login` only renders the confirmation page. Its script moves the
@@ -233,7 +233,7 @@ garbage-collects an abandoned visitor's scope yet.
 
 ## Env
 
-Non-secret (`[env]`): `PORT` (8097 local / 8080 image), `PORTAL_PUBLIC_URL`, `CORE_API_URL`,
+Non-secret (`[env]`): `PORT` (8097 local / 8080 image), `PUBLIC_WEB_URL`, `CORE_API_URL`,
 `CORE_ORG_ID`, `WEB_UI_UPSTREAM`,
 `OIDC_AUTH_ENDPOINT` / `OIDC_TOKEN_ENDPOINT` / `OIDC_USERINFO_ENDPOINT` / `OIDC_ISSUER` /
 `OIDC_JWKS_URI` / `OIDC_SCOPES` / `OIDC_CLIENT_ID`, `PORTAL_EXPECTED_TEAM_ID`,
@@ -244,7 +244,7 @@ access is derived from the core (see the security model above).
 see the security model. Boot fails on an entry that is not a bare https origin (plain http only for localhost).
 For local development only, `PORTAL_LOCAL_AUTH_BYPASS=1` mints a local session as
 `PORTAL_DEV_PRINCIPAL` without contacting OIDC. The portal refuses this in production
-and only accepts it when `PORTAL_PUBLIC_URL` is loopback.
+and only accepts it when `PUBLIC_WEB_URL` is loopback.
 
 Identity: `OIDC_PRINCIPAL_CLAIM` — `email` (default; the org-canonical id: the
 verified work email, lowercased; sign-in fails unless the IdP marks the email verified) or `sub`

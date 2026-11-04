@@ -78,8 +78,7 @@ export async function startFrontDoor(
   publishBundled();
   env.CORE_API_URL = `http://127.0.0.1:${config.port}`;
   env.CORE_ORG_ID = config.orgId;
-  env.PORTAL_PUBLIC_URL = config.publicWebUrl ?? `http://localhost:${config.publicPort}`;
-  env.WEB_UI_PUBLIC_URL = env.PORTAL_PUBLIC_URL;
+  env.PUBLIC_WEB_URL = config.publicWebUrl ?? `http://localhost:${config.publicPort}`;
   if (config.deployAppsDomain) env.PORTAL_APPS_DOMAIN ||= config.deployAppsDomain;
   const web = (await import("../../plugins/web-ui/server/index.ts")) as WebSurface;
   const webServer = await web.startServer({

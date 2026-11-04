@@ -242,7 +242,7 @@ is redeemed. The command creates no account or role grant.
 
 Run it from the deployment directory with its `.env`, or use `--config` and
 `--env-file`. Inside a running deployment without a config file, supply
-`PORTAL_PUBLIC_URL`, `PORTAL_SESSION_SECRET`, and `ADMIN_GRANTS` through its
+`PUBLIC_WEB_URL`, `PORTAL_SESSION_SECRET`, and `ADMIN_GRANTS` through its
 environment. The CLI prints only the URL, which is a temporary login credential;
 do not publish it or put it in shared logs.
 

@@ -180,7 +180,7 @@ try {
     CORE_API_URL: coreBase,
     CORE_ORG_ID: orgId,
     CORE_SIGNING_SECRET: secret,
-    WEB_UI_PUBLIC_URL: webBase,
+    PUBLIC_WEB_URL: webBase,
     WEB_UI_PRINCIPALS: actor,
   });
   const webUi = await import("../plugins/web-ui/server/index.ts");

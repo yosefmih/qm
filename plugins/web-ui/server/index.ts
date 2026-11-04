@@ -37,7 +37,7 @@ import {
 } from "../../chassis/src/http.ts";
 import { verifyPortalIdentity, PORTAL_IDENTITY_HEADER } from "../../chassis/src/portal-identity.ts";
 import { boundTenant, withTenant, withoutTenant } from "../../chassis/src/tenant.ts";
-import { coreHostTenants, frontDoorHostTenants, inHostTenant, requestHostname } from "../../chassis/src/host-tenant.ts";
+import { coreHostTenants, forwardedHostTenants, inHostTenant, requestHostname } from "../../chassis/src/host-tenant.ts";
 import { createBrandingCache, injectBranding } from "../../chassis/src/branding.ts";
 import { parseSuggestedActivities } from "../../chassis/src/suggested-activities.ts";
 import { principalInAllowlist } from "../../chassis/src/principal-allowlist.ts";
@@ -52,7 +52,7 @@ import {
 const SUBAGENT_THREAD_PREFIX = "agent:main:subagent:";
 const welcomeCohort = process.env.WEB_UI_WELCOME_COHORT?.trim().slice(0, 40) || undefined;
 const suggestedActivities = parseSuggestedActivities(process.env.WEB_UI_SUGGESTED_ACTIVITIES);
-const PUBLIC_URL = (process.env.WEB_UI_PUBLIC_URL ?? "http://localhost:8096").replace(/\/$/, "");
+const PUBLIC_URL = (process.env.PUBLIC_WEB_URL ?? "http://localhost:8096").replace(/\/$/, "");
 const WEB_UI_DEV = process.env.WEB_UI_DEV === "1";
 const ALLOW_UNSIGNED_TEST_IDENTITY =
   process.env.NODE_ENV === "test" && process.env.ALLOW_UNSIGNED_TEST_IDENTITY === "1";
@@ -2804,7 +2804,7 @@ const apiRoutes: readonly WebRoute[] = [
     handle: async (c) => {
       const { req, res, user } = c;
       if (boundTenant() === undefined)
-        multiTenant = (await frontDoorHostTenants(hostTenants, req)(requestHostname(req))).multi;
+        multiTenant = (await forwardedHostTenants(hostTenants, req)(requestHostname(req))).multi;
       res.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
@@ -3642,7 +3642,7 @@ function inRequestTenant(
     }
     return claimed ? withTenant(claimed, handle) : handle();
   };
-  return inHostTenant(frontDoorHostTenants(hostTenants, req), req, res, bound, claimed === undefined);
+  return inHostTenant(forwardedHostTenants(hostTenants, req), req, res, bound, claimed === undefined);
 }
 
 const STATIC_ASSET = /^\/assets\/[a-zA-Z0-9_.-]+$/;

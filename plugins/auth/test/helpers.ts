@@ -6,8 +6,8 @@ import type { ClaimStore } from "../../chassis/src/claims.ts";
 import type { Mailer, OutgoingEmail } from "../../chassis/src/resend.ts";
 import { loadSigningKey } from "../src/keys.ts";
 import { TokenSigner } from "../src/tokens.ts";
-import { brokerHostTenants, createAuthHandler } from "../src/server.ts";
-import { inHostTenant, type HostTenantLookup } from "../../chassis/src/host-tenant.ts";
+import { createAuthHandler } from "../src/server.ts";
+import { forwardedHostTenants, inHostTenant, type HostTenantLookup } from "../../chassis/src/host-tenant.ts";
 import type { TenantSignInLookup } from "../../chassis/src/tenant-sign-in.ts";
 
 export const CLIENT_ID = "qm-portal";
@@ -145,7 +145,9 @@ export async function startHarness(
     onBackgroundTask: (task) => pending.push(task),
   });
   const server: Server = createServer((req, res) => {
-    void inHostTenant(brokerHostTenants(options.hostTenants, req), req, res, () => handle(req, res)).catch(() => {
+    void inHostTenant(options.hostTenants && forwardedHostTenants(options.hostTenants, req), req, res, () =>
+      handle(req, res),
+    ).catch(() => {
       if (!res.headersSent) res.writeHead(500);
       res.end();
     });

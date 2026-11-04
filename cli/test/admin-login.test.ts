@@ -97,7 +97,7 @@ test("the command runs inside a deployment using environment variables alone", (
   try {
     const env = {
       ...process.env,
-      PORTAL_PUBLIC_URL: settings.publicUrl,
+      PUBLIC_WEB_URL: settings.publicUrl,
       PORTAL_SESSION_SECRET: settings.secret,
       ADMIN_GRANTS: settings.adminGrants,
     };

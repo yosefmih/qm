@@ -26,7 +26,7 @@
       "PORTAL_EXPECTED_TEAM_ID": "T00000000"
     },
     "slack": {
-      "WEB_UI_PUBLIC_URL": "https://beta-core.fly.dev"
+      "PUBLIC_WEB_URL": "https://beta-core.fly.dev"
     }
   }
 }

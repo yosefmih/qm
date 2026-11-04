@@ -87,7 +87,7 @@ import {
 } from "../../chassis/src/env.ts";
 import { isDeploymentGitRoute } from "../../chassis/src/deployment-git.ts";
 
-const PUBLIC_URL = (process.env.PORTAL_PUBLIC_URL ?? "http://localhost:8097").replace(/\/$/, "");
+const PUBLIC_URL = (process.env.PUBLIC_WEB_URL ?? "http://localhost:8097").replace(/\/$/, "");
 const SESSION_SECRET = process.env.PORTAL_SESSION_SECRET;
 const SESSION_TTL_S = Number(process.env.PORTAL_SESSION_TTL_S ?? 604800);
 const SESSION_MAX_TTL_S = Number(process.env.PORTAL_SESSION_MAX_TTL_S ?? Math.max(2592000, SESSION_TTL_S));
@@ -95,7 +95,7 @@ const SESSION_RENEW_AFTER_S = Math.floor(SESSION_TTL_S / 2);
 const APPS_DOMAIN = process.env.PORTAL_APPS_DOMAIN || process.env.DEPLOY_APPS_DOMAIN || undefined;
 const COOKIE_DOMAIN =
   process.env.PORTAL_COOKIE_DOMAIN ||
-  (APPS_DOMAIN ? derivedCookieDomain(hostOf(process.env.PORTAL_PUBLIC_URL ?? ""), APPS_DOMAIN) : undefined);
+  (APPS_DOMAIN ? derivedCookieDomain(hostOf(process.env.PUBLIC_WEB_URL ?? ""), APPS_DOMAIN) : undefined);
 const IS_PROD = process.env.NODE_ENV === "production";
 const SECURE_COOKIES = PUBLIC_URL.startsWith("https://");
 const ORIGIN = (() => {
@@ -950,8 +950,7 @@ function isStaticAsset(req: IncomingMessage): boolean {
   return req.method === "GET" && STATIC_ASSET.test((req.url ?? "").split("?")[0] ?? "");
 }
 
-// Hashed build output is identical for every tenant, so it is served before the host is resolved.
-function serveStaticAsset(req: IncomingMessage, res: ServerResponse): Promise<void> {
+function serveTenantlessAsset(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://portal.local");
   res.setHeader("strict-transport-security", "max-age=63072000; includeSubDomains");
   res.setHeader("referrer-policy", "no-referrer");
@@ -984,7 +983,7 @@ const server = createServer((req, res) => {
     return found;
   };
   let served: Promise<void>;
-  if (isStaticAsset(req)) served = serveStaticAsset(req, res);
+  if (isStaticAsset(req)) served = serveTenantlessAsset(req, res);
   else if (isAppHost(req)) served = handle(req, res);
   else served = inHostTenant(lookup, req, res, () => handle(req, res));
   void served.catch((err: unknown) => {
@@ -1835,7 +1834,7 @@ export function bootChecks(): void {
     problems.push("PORTAL_LOCAL_AUTH_BYPASS may not be enabled in production");
   }
   if (LOCAL_AUTH_BYPASS_REQUESTED && !isLoopbackUrl(PUBLIC_URL)) {
-    problems.push("PORTAL_LOCAL_AUTH_BYPASS requires a localhost, 127.0.0.1, or ::1 PORTAL_PUBLIC_URL");
+    problems.push("PORTAL_LOCAL_AUTH_BYPASS requires a localhost, 127.0.0.1, or ::1 PUBLIC_WEB_URL");
   }
   if (PLAYGROUND) {
     if (!Number.isInteger(PLAYGROUND_MINTS_PER_IP) || PLAYGROUND_MINTS_PER_IP < 1 || PLAYGROUND_MINTS_PER_IP > 64) {
@@ -1869,7 +1868,7 @@ export function bootChecks(): void {
     );
   }
   if (COOKIE_DOMAIN && !hostIsWithinDomain(hostOf(PUBLIC_URL), COOKIE_DOMAIN)) {
-    problems.push(`PORTAL_COOKIE_DOMAIN (${COOKIE_DOMAIN}) must cover PORTAL_PUBLIC_URL's host`);
+    problems.push(`PORTAL_COOKIE_DOMAIN (${COOKIE_DOMAIN}) must cover PUBLIC_WEB_URL's host`);
   }
   if (APPS_DOMAIN && COOKIE_DOMAIN && !hostIsWithinDomain(APPS_DOMAIN, COOKIE_DOMAIN)) {
     problems.push(`PORTAL_COOKIE_DOMAIN (${COOKIE_DOMAIN}) must cover PORTAL_APPS_DOMAIN (${APPS_DOMAIN})`);
@@ -1930,7 +1929,7 @@ export function bootChecks(): void {
       problems.push("PORTAL_SESSION_SECRET must differ from CORE_SIGNING_SECRET");
     }
     if (!isSecureOrLoopbackUrl(PUBLIC_URL))
-      problems.push("PORTAL_PUBLIC_URL must be https in production unless it is a loopback address");
+      problems.push("PUBLIC_WEB_URL must be https in production unless it is a loopback address");
     if (!isSecureOrLoopbackUrl(OIDC.authEndpoint)) {
       problems.push(
         `OIDC_AUTH_ENDPOINT must be https unless it is a loopback address, since the browser is sent there: ${OIDC.authEndpoint}`,
@@ -1997,8 +1996,7 @@ export async function startServer(options: { port: number; host?: string }): Pro
       console.log(`[portal] public front door on http://localhost:${options.port} (org ${ORG})`);
       if (!SESSION_SECRET)
         console.warn("[portal] PORTAL_SESSION_SECRET unset, using an INSECURE dev key (dev/test only)");
-      if (!SECURE_COOKIES)
-        console.warn("[portal] PORTAL_PUBLIC_URL is not https, cookies are NOT Secure (dev/test only)");
+      if (!SECURE_COOKIES) console.warn("[portal] PUBLIC_WEB_URL is not https, cookies are NOT Secure (dev/test only)");
       if (LOCAL_AUTH_BYPASS)
         console.warn(
           `[portal] PORTAL_LOCAL_AUTH_BYPASS=1 -- using ${LOCAL_AUTH_PRINCIPAL} as the local session principal (dev/test only)`,

@@ -30,7 +30,7 @@ test("the standalone CLI and core agree on runtime-enforced core secret names", 
 test("the front door refuses to boot in production without the sign-in secrets the CLI requires of core", () => {
   const signIn: NodeJS.ProcessEnv = {
     NODE_ENV: "production",
-    PORTAL_PUBLIC_URL: "https://agent.example.com",
+    PUBLIC_WEB_URL: "https://agent.example.com",
     PORTAL_SESSION_SECRET: "front-door-session-secret-0123456789abcdef",
     CORE_SIGNING_SECRET: "front-door-core-signing-secret-0123456789ab",
     OIDC_CLIENT_ID: "client-id",

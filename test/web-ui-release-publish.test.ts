@@ -120,7 +120,7 @@ test("a running core serves each published web UI release without restarting", a
       DATA_DIR: dataDir,
       PORT: String(apiPort),
       PUBLIC_PORT: String(publicPort),
-      PORTAL_PUBLIC_URL: `http://localhost:${publicPort}`,
+      PUBLIC_WEB_URL: `http://localhost:${publicPort}`,
       PORTAL_LOCAL_AUTH_BYPASS: "1",
       PORTAL_DEV_PRINCIPAL: "dev@example.com",
       CONNECTOR_SECRET_KEY: "a".repeat(64),

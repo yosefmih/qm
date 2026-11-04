@@ -118,7 +118,7 @@ test("docker up delivers secrets via a 0600 env-file, never on the docker argv",
             PUBLIC_API_URL: "https://config-placeholder.invalid",
             FLY_RESIDENT_ENV_SB_TOKEN: "config-placeholder",
           },
-          slack: { WEB_UI_PUBLIC_URL: "http://folded.example.com/web-ui", CORE_SIGNING_SECRET: "config-placeholder" },
+          slack: { PUBLIC_WEB_URL: "http://folded.example.com/web-ui", CORE_SIGNING_SECRET: "config-placeholder" },
         },
       }),
     );
@@ -169,7 +169,7 @@ test("docker up delivers secrets via a 0600 env-file, never on the docker argv",
     assert.ok(argv.includes("SECURITY_SCREEN=enforce"));
 
     assert.ok(
-      argv.includes("WEB_UI_PUBLIC_URL=http://folded.example.com/web-ui"),
+      argv.includes("PUBLIC_WEB_URL=http://folded.example.com/web-ui"),
       "virtual-service env folds into the core env",
     );
     assert.ok(
