@@ -36,7 +36,7 @@ export function coreHostTenants(core: string, secret: string | undefined): HostT
   };
 }
 
-export function hostnameOf(host: string): string {
+function hostnameOf(host: string): string {
   return host.trim().toLowerCase().replace(/:\d+$/, "");
 }
 
