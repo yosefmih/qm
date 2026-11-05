@@ -114,6 +114,7 @@ export function createMessagingMethods(
   | "resolveChannel"
   | "directoryMembers"
   | "directoryChannels"
+  | "directoryChannelsFor"
   | "directoryMember"
   | "samePerson"
   | "personMatcher"
@@ -517,6 +518,9 @@ export function createMessagingMethods(
     },
     directoryChannels() {
       return deps.directory.listChannels();
+    },
+    directoryChannelsFor(principalId) {
+      return deps.directory.listChannelsFor(principalId);
     },
     async directoryMember(principalId) {
       return (
